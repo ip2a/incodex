@@ -1,0 +1,144 @@
+export interface SentryInitOptions {
+  buildFlavor: string;
+  appVersion: string;
+  buildNumber: string;
+  codexAppSessionId: string;
+}
+
+export interface ServeCommandOptions {
+  appPath: string;
+  devMode: boolean;
+  listenHost: string;
+  listenPort: number;
+  tlsCertPath: string | null;
+  tlsKeyPath: string | null;
+  token: string;
+}
+
+export interface IncodexServerOptions {
+  listenHost: string;
+  listenPort: number;
+  protocol?: "http" | "https";
+  tls?: {
+    cert: string | Buffer;
+    key: string | Buffer;
+  };
+  token: string;
+  relay: HostBridge;
+  webviewRoot: string;
+  readIncodexStylesheet: () => Promise<string>;
+  renderIndexHtml: () => Promise<string>;
+  renderWebManifest: () => Promise<string>;
+  renderServiceWorkerScript: () => Promise<string>;
+  heartbeatIntervalMs?: number;
+  heartbeatTimeoutMs?: number;
+}
+
+export interface HostBridge {
+  on(event: "bridge_message", listener: (message: unknown) => void): this;
+  on(event: "worker_message", listener: (workerName: string, message: unknown) => void): this;
+  on(event: "error", listener: (error: Error) => void): this;
+  off?(event: "bridge_message", listener: (message: unknown) => void): this;
+  off?(event: "worker_message", listener: (workerName: string, message: unknown) => void): this;
+  off?(event: "error", listener: (error: Error) => void): this;
+  close(): Promise<void>;
+  forwardBridgeMessage(message: unknown): Promise<void>;
+  sendWorkerMessage(workerName: string, message: unknown): Promise<void>;
+  subscribeWorker(workerName: string): Promise<void>;
+  unsubscribeWorker(workerName: string): Promise<void>;
+  handleIpcRequest?(payload: unknown): Promise<unknown>;
+}
+
+export interface JsonRecord {
+  [key: string]: unknown;
+}
+
+export interface BrowserBridgeEnvelope {
+  type: "bridge_message";
+  message: unknown;
+}
+
+export interface BrowserWorkerSubscribeEnvelope {
+  type: "worker_subscribe";
+  workerName: string;
+}
+
+export interface BrowserWorkerUnsubscribeEnvelope {
+  type: "worker_unsubscribe";
+  workerName: string;
+}
+
+export interface BrowserWorkerMessageEnvelope {
+  type: "worker_message";
+  workerName: string;
+  message: unknown;
+}
+
+export interface BrowserFocusStateEnvelope {
+  type: "focus_state";
+  isFocused: boolean;
+}
+
+export interface BrowserHeartbeatAckEnvelope {
+  type: "heartbeat_ack";
+  sentAt: number;
+}
+
+export type BrowserToServerEnvelope =
+  | BrowserBridgeEnvelope
+  | BrowserWorkerSubscribeEnvelope
+  | BrowserWorkerUnsubscribeEnvelope
+  | BrowserWorkerMessageEnvelope
+  | BrowserFocusStateEnvelope
+  | BrowserHeartbeatAckEnvelope;
+
+export interface ServerBridgeEnvelope {
+  type: "bridge_message";
+  message: unknown;
+}
+
+export interface ServerWorkerMessageEnvelope {
+  type: "worker_message";
+  workerName: string;
+  message: unknown;
+}
+
+export interface ServerClientNoticeEnvelope {
+  type: "client_notice";
+  message: string;
+}
+
+export interface ServerCssReloadEnvelope {
+  type: "css_reload";
+  href: string;
+}
+
+export interface ServerHeartbeatEnvelope {
+  type: "heartbeat";
+  sentAt: number;
+}
+
+export interface ServerSessionRevokedEnvelope {
+  type: "session_revoked";
+  reason: string;
+}
+
+export interface ServerErrorEnvelope {
+  type: "error";
+  message: string;
+}
+
+export type ServerToBrowserEnvelope =
+  | ServerBridgeEnvelope
+  | ServerWorkerMessageEnvelope
+  | ServerClientNoticeEnvelope
+  | ServerCssReloadEnvelope
+  | ServerHeartbeatEnvelope
+  | ServerSessionRevokedEnvelope
+  | ServerErrorEnvelope;
+
+export interface HostMessageRouteResult {
+  deliver: boolean;
+  sessionId?: string;
+  message?: unknown;
+}

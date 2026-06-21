@@ -1,0 +1,45 @@
+name: release-publish-npm
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.9.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify tag matches package version
+        run: test "v$(node -p 'require(\"./package.json\").version')" = "${GITHUB_REF_NAME}"
+
+      - name: Check formatting, lint, and types
+        run: pnpm run check:commit
+
+      - name: Build package
+        run: pnpm run build
+
+      - name: Publish to npm with provenance
+        run: npm publish --provenance --access public
