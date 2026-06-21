@@ -33,7 +33,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Verify tag matches package version
-        run: test "v$(node -p 'require(\"./package.json\").version')" = "${GITHUB_REF_NAME}"
+        run: test "v$(node -p 'require("./package.json").version')" = "${GITHUB_REF_NAME}"
 
       - name: Check formatting, lint, and types
         run: pnpm run check:commit
