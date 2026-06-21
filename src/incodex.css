@@ -930,6 +930,41 @@ html[data-incodex="true"] [aria-label="Open in Popout Window"] {
     font-size: 16px !important;
   }
 
+  html[data-incodex="true"] {
+    --incodex-mobile-shell-height: var(--incodex-mobile-viewport-height, 100dvh);
+  }
+
+  html[data-incodex="true"] body,
+  html[data-incodex="true"] #root {
+    min-height: var(--incodex-mobile-shell-height);
+  }
+
+  html[data-incodex="true"] .main-surface {
+    min-height: 0 !important;
+    height: var(--incodex-mobile-shell-height) !important;
+    max-height: var(--incodex-mobile-shell-height) !important;
+  }
+
+  html[data-incodex="true"] .thread-scroll-container {
+    min-height: 0;
+    scroll-padding-bottom: calc(
+      var(--thread-scroll-padding-bottom, 0px) + env(safe-area-inset-bottom, 0px)
+    ) !important;
+  }
+
+  html[data-incodex="true"]
+    .thread-scroll-container
+    [class*="sticky"][class*="bottom-0"]:has([data-pip-obstacle="thread-footer"]) {
+    padding-bottom: max(1rem, calc(0.75rem + env(safe-area-inset-bottom, 0px))) !important;
+  }
+
+  html[data-incodex="true"] .thread-scroll-container [data-pip-obstacle="thread-footer"] {
+    max-height: calc(
+      var(--incodex-mobile-shell-height) - env(safe-area-inset-top, 0px) -
+        env(safe-area-inset-bottom, 0px)
+    );
+  }
+
   html[data-incodex="true"] .app-shell-left-panel {
     position: fixed !important;
     inset: 0 auto 0 0 !important;
@@ -1076,6 +1111,17 @@ html[data-incodex="true"] [aria-label="Open in Popout Window"] {
   html[data-incodex="true"][data-incodex-mobile-right-panel="closed"]
     [data-incodex-mobile-right-panel-root="true"] {
     transform: translateX(100%) !important;
+    pointer-events: none !important;
+    visibility: hidden !important;
+  }
+
+  html[data-incodex="true"] .main-surface aside,
+  html[data-incodex="true"] [data-incodex-mobile-right-panel-root="true"],
+  html[data-incodex="true"] #incodex-mobile-side-panel-close,
+  html[data-incodex="true"] #incodex-mobile-side-panel-open,
+  html[data-incodex="true"] button[aria-label="Toggle side panel"],
+  html[data-incodex="true"] button[title="Toggle side panel"] {
+    display: none !important;
     pointer-events: none !important;
     visibility: hidden !important;
   }

@@ -3,6 +3,8 @@
 !/.github/workflows/
 !/.github/workflows/**
 !/.gitignore
+!/AGENTS.md
+!/commitlint.config.js
 !/LICENSE
 !/package.json
 !/pnpm-lock.yaml

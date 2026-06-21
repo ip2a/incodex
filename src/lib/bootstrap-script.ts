@@ -142,6 +142,8 @@ function bootstrapIncodexInBrowser(config: BootstrapScriptConfig): void {
   const RETRY_DELAYS_MS = [1000, 2000, 5000, 8000, 12000] as const;
   const SESSION_CHECK_PATH = "/session-check";
   const MOBILE_SIDEBAR_MEDIA_QUERY = "(max-width: 640px), (pointer: coarse) and (max-width: 900px)";
+  const MOBILE_VIEWPORT_HEIGHT_CSS_VARIABLE = "--incodex-mobile-viewport-height";
+  const FORCE_MOBILE_RIGHT_PANEL_CLOSED = true;
   const LEGACY_SIDEBAR_MODE_PERSISTED_ATOM_KEY = "incodex-sidebar-mode";
   const SIDEBAR_INTERACTION_ARM_MS = 500;
   const SIDEBAR_MODE_TOGGLE_SETTLE_MS = 350;
@@ -240,6 +242,7 @@ function bootstrapIncodexInBrowser(config: BootstrapScriptConfig): void {
   syncRouteDataset();
   installRoutePersistence();
   installEnterBehaviorOverrideObservers();
+  installMobileViewportHeightSync();
   installDebugConsoleApi();
   installGlobalErrorDebugHandlers();
 
@@ -1466,6 +1469,10 @@ function bootstrapIncodexInBrowser(config: BootstrapScriptConfig): void {
 
     event.preventDefault();
     stopEventPropagation(event);
+    if (FORCE_MOBILE_RIGHT_PANEL_CLOSED) {
+      closeMobileSidePanel();
+      return;
+    }
     reopenMobileSidePanel();
   }
 
@@ -1480,6 +1487,13 @@ function bootstrapIncodexInBrowser(config: BootstrapScriptConfig): void {
       !(nearestInteractive instanceof Element) ||
       !isMobileSidePanelToggleTrigger(nearestInteractive)
     ) {
+      return;
+    }
+
+    if (FORCE_MOBILE_RIGHT_PANEL_CLOSED) {
+      event.preventDefault();
+      stopEventPropagation(event);
+      closeMobileSidePanel();
       return;
     }
 
@@ -1563,6 +1577,18 @@ function bootstrapIncodexInBrowser(config: BootstrapScriptConfig): void {
       return;
     }
 
+    if (FORCE_MOBILE_RIGHT_PANEL_CLOSED) {
+      const panelRoot = findExistingMobileSidePanelRoot() ?? findMobileSidePanelRoot();
+      if (panelRoot) {
+        isMobileSidePanelDismissed = true;
+        tagMobileSidePanelRoot(panelRoot);
+      }
+      document.documentElement.dataset.incodexMobileRightPanel = "closed";
+      mobileSidePanelCloseButton.hidden = true;
+      mobileSidePanelOpenButton.hidden = true;
+      return;
+    }
+
     if (isMobileSidePanelDismissed) {
       const dismissedPanelRoot = findExistingMobileSidePanelRoot();
       if (dismissedPanelRoot) {
@@ -1603,6 +1629,15 @@ function bootstrapIncodexInBrowser(config: BootstrapScriptConfig): void {
   }
 
   function openDismissedMobileSidePanel(panelRoot: HTMLElement): void {
+    if (FORCE_MOBILE_RIGHT_PANEL_CLOSED) {
+      isMobileSidePanelDismissed = true;
+      tagMobileSidePanelRoot(panelRoot);
+      document.documentElement.dataset.incodexMobileRightPanel = "closed";
+      mobileSidePanelCloseButton.hidden = true;
+      mobileSidePanelOpenButton.hidden = true;
+      return;
+    }
+
     isMobileSidePanelDismissed = false;
     tagMobileSidePanelRoot(panelRoot);
     document.documentElement.dataset.incodexMobileRightPanel = "open";
@@ -3624,6 +3659,25 @@ function bootstrapIncodexInBrowser(config: BootstrapScriptConfig): void {
     document.addEventListener("focusout", refreshEffectiveEnterBehavior, true);
     window.addEventListener("resize", refreshEffectiveEnterBehavior);
     window.visualViewport?.addEventListener("resize", refreshEffectiveEnterBehavior);
+  }
+
+  function installMobileViewportHeightSync(): void {
+    const sync = (): void => {
+      const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
+      if (!Number.isFinite(viewportHeight) || viewportHeight <= 0) {
+        return;
+      }
+
+      document.documentElement.style.setProperty(
+        MOBILE_VIEWPORT_HEIGHT_CSS_VARIABLE,
+        `${viewportHeight}px`,
+      );
+    };
+
+    sync();
+    window.addEventListener("resize", sync);
+    window.visualViewport?.addEventListener("resize", sync);
+    window.visualViewport?.addEventListener("scroll", sync);
   }
 
   function rewriteBridgeMessageForLocalOverrides(message: unknown): unknown {
