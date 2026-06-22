@@ -13,6 +13,10 @@ import {
   DefaultCodexDesktopGitWorkerBridge,
   type CodexDesktopGitWorkerBridge,
 } from "./codex-desktop-git-worker.js";
+import {
+  deriveCodexDesktopGlobalStatePath,
+  loadCodexDesktopProjects,
+} from "./codex-desktop-projects.js";
 import { debugLog } from "./debug.js";
 import {
   loadLocalEnvironment,
@@ -21,6 +25,7 @@ import {
   saveLocalEnvironmentConfig,
 } from "./local-environments.js";
 import type { HostBridge, JsonRecord } from "./protocol.js";
+import { listCodexSessionCwds } from "./session-cwd-index.js";
 import {
   derivePersistedAtomRegistryPath,
   loadPersistedAtomRegistry,
@@ -29,6 +34,7 @@ import {
 import {
   deriveWorkspaceRootRegistryPath,
   loadWorkspaceRootRegistry,
+  mergeWorkspaceRootRegistryProjects,
   saveWorkspaceRootRegistry,
   type WorkspaceRootRegistryState,
 } from "./workspace-root-registry.js";
@@ -41,6 +47,7 @@ import {
   type TerminalRunActionMessage,
   type TerminalWriteMessage,
 } from "./terminal-session-manager.js";
+import { normalizeThreadListParams } from "./thread-list-params.js";
 
 interface AppServerBridgeOptions {
   appPath: string;
@@ -51,6 +58,11 @@ interface AppServerBridgeOptions {
   workspaceRootRegistryPath?: string;
   gitWorkerBridge?: CodexDesktopGitWorkerBridge;
   codexCliPath?: string;
+}
+
+interface SessionCwdIndexCache {
+  loadedAt: number;
+  cwds: string[];
 }
 
 interface WhamUsageCredits {
@@ -133,6 +145,7 @@ interface ManagedCodexAuth {
 interface AppServerMcpRequestEnvelope {
   type: "mcp-request";
   request?: JsonRpcRequest;
+  message?: JsonRpcRequest;
 }
 
 interface AppServerMcpResponseEnvelope {
@@ -273,6 +286,7 @@ const STATSIG_INITIALIZE_HOST = "ab.chatgpt.com";
 const STATSIG_INITIALIZE_PATH = "/v1/initialize";
 const STATSIG_REGISTER_HOST = "chatgpt.com";
 const STATSIG_REGISTER_PATH = "/ces/v1/rgstr";
+const SESSION_CWD_INDEX_TTL_MS = 30_000;
 
 export class AppServerBridge extends EventEmitter implements HostBridge {
   private readonly child: ChildProcessWithoutNullStreams;
@@ -297,6 +311,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
   private readonly workspaceRoots = new Set<string>();
   private readonly workspaceRootLabels = new Map<string, string>();
   private readonly codexHomePath: string;
+  private sessionCwdIndexCache: SessionCwdIndexCache | null = null;
   private persistedAtomRegistryPath: string;
   private workspaceRootRegistryPath: string;
   private readonly gitWorkerBridge: CodexDesktopGitWorkerBridge;
@@ -856,7 +871,32 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       });
     }
 
+    await this.restoreCodexDesktopWorkspaceRoots();
     this.syncWorkspaceGlobalState();
+  }
+
+  private async restoreCodexDesktopWorkspaceRoots(): Promise<void> {
+    try {
+      const loaded = await loadCodexDesktopProjects(deriveCodexDesktopGlobalStatePath());
+      if (loaded.projects.length === 0) {
+        return;
+      }
+
+      const merged = mergeWorkspaceRootRegistryProjects(
+        this.snapshotWorkspaceRootRegistry(),
+        loaded.projects,
+      );
+      if (!merged.changed) {
+        return;
+      }
+
+      this.applyWorkspaceRootRegistry(merged.state);
+      await this.persistWorkspaceRootRegistry();
+    } catch (error) {
+      debugLog("app-server", "failed to import Codex desktop workspace roots", {
+        error: normalizeError(error).message,
+      });
+    }
   }
 
   private async restorePersistedAtomRegistry(): Promise<void> {
@@ -891,6 +931,10 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     const rawEntries = await readdir(currentPath, { withFileTypes: true });
     const entries = await Promise.all(
       rawEntries.map(async (entry) => {
+        if (entry.name.startsWith(".")) {
+          return null;
+        }
+
         const path = join(currentPath, entry.name);
         if (!(await this.isDirectory(path))) {
           return null;
@@ -1270,18 +1314,19 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
   }
 
   private async handleMcpRequest(message: AppServerMcpRequestEnvelope): Promise<void> {
-    if (!message.request || typeof message.request.method !== "string") {
+    const request = message.request ?? message.message;
+    if (!request || typeof request.method !== "string") {
       return;
     }
 
-    const localResult = await this.handleLocalMcpRequest(message.request);
+    const localResult = await this.handleLocalMcpRequest(request);
     if (localResult.handled) {
-      if (message.request.id !== undefined) {
+      if (request.id !== undefined) {
         this.emitBridgeMessage({
           type: "mcp-response",
           hostId: this.hostId,
           message: {
-            id: message.request.id,
+            id: request.id,
             ...(localResult.error !== undefined
               ? { error: localResult.error }
               : { result: localResult.result }),
@@ -1291,14 +1336,14 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       return;
     }
 
-    if (message.request.id !== undefined) {
-      this.pendingMcpRequestMethods.set(String(message.request.id), message.request.method);
+    if (request.id !== undefined) {
+      this.pendingMcpRequestMethods.set(String(request.id), request.method);
     }
 
     this.sendJsonRpcMessage({
-      id: message.request.id,
-      method: message.request.method,
-      params: this.sanitizeMcpParams(message.request.method, message.request.params),
+      id: request.id,
+      method: request.method,
+      params: await this.sanitizeMcpParams(request.method, request.params),
     });
   }
 
@@ -2917,7 +2962,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     };
   }
 
-  private sanitizeMcpParams(method: string, params: unknown): unknown {
+  private async sanitizeMcpParams(method: string, params: unknown): Promise<unknown> {
     if (!isJsonRecord(params)) {
       return params;
     }
@@ -2927,9 +2972,36 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
         return this.sanitizeThreadStartParams(params);
       case "thread/resume":
         return this.sanitizeThreadResumeParams(params);
+      case "thread/list":
+        return await this.sanitizeThreadListParams(params);
       default:
         return params;
     }
+  }
+
+  private async sanitizeThreadListParams(params: JsonRecord): Promise<JsonRecord> {
+    if (!("cwd" in params) || params.cwd === null || params.cwd === undefined) {
+      return normalizeThreadListParams(params, []);
+    }
+
+    return normalizeThreadListParams(params, await this.getSessionCwdIndex());
+  }
+
+  private async getSessionCwdIndex(): Promise<string[]> {
+    const now = Date.now();
+    if (
+      this.sessionCwdIndexCache &&
+      now - this.sessionCwdIndexCache.loadedAt < SESSION_CWD_INDEX_TTL_MS
+    ) {
+      return this.sessionCwdIndexCache.cwds;
+    }
+
+    const cwds = await listCodexSessionCwds(join(this.codexHomePath, "sessions"));
+    this.sessionCwdIndexCache = {
+      loadedAt: now,
+      cwds,
+    };
+    return cwds;
   }
 
   private sanitizeThreadStartParams(params: JsonRecord): JsonRecord {
@@ -3158,29 +3230,35 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
   }
 
   private async persistWorkspaceRootRegistry(): Promise<void> {
-    const roots = Array.from(this.workspaceRoots);
+    const state = this.snapshotWorkspaceRootRegistry();
     try {
-      const labels = Object.fromEntries(
-        roots.flatMap((root) => {
-          const label = this.workspaceRootLabels.get(root)?.trim();
-          return label ? [[root, label] as const] : [];
-        }),
-      );
-      await saveWorkspaceRootRegistry(this.workspaceRootRegistryPath, {
-        roots,
-        labels,
-        activeRoot:
-          this.activeWorkspaceRoot && this.workspaceRoots.has(this.activeWorkspaceRoot)
-            ? this.activeWorkspaceRoot
-            : (roots[0] ?? null),
-        desktopImportPromptSeen: this.desktopImportPromptSeen,
-      });
+      await saveWorkspaceRootRegistry(this.workspaceRootRegistryPath, state);
     } catch (error) {
       debugLog("app-server", "failed to persist workspace root registry", {
         error: normalizeError(error).message,
         path: this.workspaceRootRegistryPath,
       });
     }
+  }
+
+  private snapshotWorkspaceRootRegistry(): WorkspaceRootRegistryState {
+    const roots = Array.from(this.workspaceRoots);
+    const labels = Object.fromEntries(
+      roots.flatMap((root) => {
+        const label = this.workspaceRootLabels.get(root)?.trim();
+        return label ? [[root, label] as const] : [];
+      }),
+    );
+
+    return {
+      roots,
+      labels,
+      activeRoot:
+        this.activeWorkspaceRoot && this.workspaceRoots.has(this.activeWorkspaceRoot)
+          ? this.activeWorkspaceRoot
+          : (roots[0] ?? null),
+      desktopImportPromptSeen: this.desktopImportPromptSeen,
+    };
   }
 
   private ensureWorkspaceRoot(
@@ -3280,8 +3358,20 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     this.emitBridgeMessage({
       type: "incodex-open-workspace-root-picker",
       context,
-      initialPath: homedir(),
+      initialPath: this.getWorkspaceRootPickerInitialPath(),
     });
+  }
+
+  private getWorkspaceRootPickerInitialPath(): string {
+    if (this.activeWorkspaceRoot && this.workspaceRoots.has(this.activeWorkspaceRoot)) {
+      return this.activeWorkspaceRoot;
+    }
+
+    if (this.cwd.length > 0) {
+      return this.cwd;
+    }
+
+    return homedir();
   }
 
   private async handleWorkspaceRootOptionPicked(message: JsonRecord): Promise<void> {

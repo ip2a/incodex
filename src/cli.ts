@@ -8,10 +8,16 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 import { AppServerBridge } from "./lib/app-server-bridge.js";
+import { createAuthController, startOtpCodeLogging, type OtpCodeSnapshot } from "./lib/auth.js";
 import { normalizeCliArgv } from "./lib/cli-args.js";
 import { loadCodexBundle, resolveDefaultCodexAppPath } from "./lib/codex-bundle.js";
 import { renderBootstrapScript } from "./lib/bootstrap-script.js";
 import { patchIndexHtml } from "./lib/html-patcher.js";
+import {
+  applySecurityKeyOverride,
+  loadIncodexConfig,
+  resolveListenHostForAccess,
+} from "./lib/incodex-config.js";
 import { parseListenAddress } from "./lib/listen-address.js";
 import { renderPwaHeadTags, renderServiceWorkerScript, renderWebManifest } from "./lib/pwa.js";
 import type { SentryInitOptions, ServeCommandOptions } from "./lib/protocol.js";
@@ -23,7 +29,7 @@ import {
   recordUsedCodexBuild,
 } from "./lib/used-codex-build.js";
 
-const DEFAULT_LISTEN = "127.0.0.1:8787";
+const DEFAULT_LISTEN_PORT = 8787;
 const INCODEX_BACKGROUND_COLOR = "#111827";
 const INCODEX_MANIFEST_HREF = "/manifest.webmanifest";
 const INCODEX_PWA_APP_NAME = "Incodex";
@@ -98,7 +104,7 @@ async function main(): Promise<void> {
     listenPort: options.listenPort,
     protocol,
     tls,
-    token: options.token,
+    auth: options.auth,
     relay,
     webviewRoot: bundle.webviewRoot,
     readIncodexStylesheet: async () => readFile(incodexCssPath, "utf8"),
@@ -130,9 +136,11 @@ async function main(): Promise<void> {
         server.notifyStylesheetReload(String(Date.now()));
       })
     : () => {};
+  let stopOtpCodeLogging = () => {};
 
   const shutdown = async (signal: string) => {
     console.log(`\nShutting down Incodex after ${signal}...`);
+    stopOtpCodeLogging();
     stopWatchingStylesheet();
     await server.close();
     await relay.close();
@@ -152,7 +160,12 @@ async function main(): Promise<void> {
     listenHost: options.listenHost,
     listenPort: listeningAddress.port,
     protocol,
-    token: options.token,
+    appendOpenUrlCredentials: (url) => {
+      options.auth.appendOpenUrlCredentials(url);
+    },
+  });
+  stopOtpCodeLogging = startOtpCodeLogging(options.auth, (otpCode) => {
+    console.log(formatOtpCodeMessage(otpCode));
   });
 
   console.log(`Incodex listening on ${serveUrls.localUrl}`);
@@ -167,6 +180,10 @@ async function main(): Promise<void> {
       `Local network URL unavailable while listening on ${serveUrls.localUrl} (use --listen 0.0.0.0:${listeningAddress.port} to expose it on your LAN)`,
     );
   }
+  console.log(
+    `Using Incodex config ${options.configPath}${options.configCreated ? " (created)" : ""}`,
+  );
+  console.log(`Using auth mode ${options.auth.getChallenge().mode}`);
   console.log(`Using Codex ${bundle.version} from ${bundle.appPath}`);
   if (usedCodexBuild?.isUpdated && usedCodexBuild.previousBuild) {
     console.log(
@@ -183,10 +200,17 @@ async function parseServeCommand(argv: string[]): Promise<ServeCommandOptions> {
   validateServeArgs(argv);
 
   const appPath = readFlag(argv, "--app") ?? (await resolveDefaultCodexAppPath());
-  const listen = readFlag(argv, "--listen") ?? DEFAULT_LISTEN;
+  const loadedConfig = await loadIncodexConfig();
+  const authConfig = applySecurityKeyOverride(
+    loadedConfig.config,
+    readFlag(argv, "--token") ?? null,
+  );
+  const auth = createAuthController(authConfig);
+  const listen =
+    readFlag(argv, "--listen") ??
+    `${resolveListenHostForAccess(authConfig.server.access)}:${DEFAULT_LISTEN_PORT}`;
   const tlsCertPath = readFlag(argv, "--tls-cert") ?? null;
   const tlsKeyPath = readFlag(argv, "--tls-key") ?? null;
-  const token = readFlag(argv, "--token") ?? "";
   const devMode = hasFlag(argv, "--dev");
 
   if ((tlsCertPath === null) !== (tlsKeyPath === null)) {
@@ -197,15 +221,22 @@ async function parseServeCommand(argv: string[]): Promise<ServeCommandOptions> {
   if (!parsedListenAddress) {
     throw new Error(`Invalid --listen value: ${listen}`);
   }
+  if (isNetworkExposedListenHost(parsedListenAddress.listenHost) && !auth.isAuthRequired()) {
+    throw new Error(
+      `LAN access requires auth. Set auth.mode to "otp_code", "key", or "code_and_key" in ${loadedConfig.configPath}.`,
+    );
+  }
 
   return {
     appPath,
+    auth,
+    configCreated: loadedConfig.created,
+    configPath: loadedConfig.configPath,
     devMode,
     listenHost: parsedListenAddress.listenHost,
     listenPort: parsedListenAddress.listenPort,
     tlsCertPath,
     tlsKeyPath,
-    token,
   };
 }
 
@@ -254,6 +285,18 @@ function printUsage(): void {
   console.error(
     "  incodex [--token <secret>] [--app <path>] [--listen 127.0.0.1:8787] [--tls-cert <cert.pem> --tls-key <key.pem>] [--dev]",
   );
+}
+
+function isNetworkExposedListenHost(listenHost: string): boolean {
+  return listenHost !== "127.0.0.1" && listenHost !== "localhost";
+}
+
+function formatOtpCodeMessage(otpCode: OtpCodeSnapshot): string {
+  const suffix =
+    otpCode.rotation === "interval" && otpCode.expiresAt !== null
+      ? ` (expires ${new Date(otpCode.expiresAt).toLocaleTimeString()})`
+      : "";
+  return `Incodex OTP code: ${otpCode.code}${suffix}`;
 }
 
 function watchIncodexStylesheet(cssFilePath: string, onChange: () => void): () => void {

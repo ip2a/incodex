@@ -6,9 +6,11 @@ import { fileURLToPath } from "node:url";
 import { EventEmitter } from "node:events";
 
 import { AppServerBridge } from "./app-server-bridge.js";
+import { createAuthController } from "./auth.js";
 import { renderBootstrapScript } from "./bootstrap-script.js";
 import { loadCodexBundle } from "./codex-bundle.js";
 import { patchIndexHtml } from "./html-patcher.js";
+import type { IncodexConfig } from "./incodex-config.js";
 import { renderPwaHeadTags, renderServiceWorkerScript, renderWebManifest } from "./pwa.js";
 import type { HostBridge, SentryInitOptions } from "./protocol.js";
 import { getServeUrls } from "./serve-url.js";
@@ -178,11 +180,12 @@ class ManagedIncodexRuntime extends EventEmitter implements IncodexRuntime {
         manifestPath: INCODEX_MANIFEST_HREF,
         iconHref: bundle.faviconHref,
       };
+      const auth = createAuthController(createRuntimeAuthConfig(this.options.token));
 
       server = new IncodexServer({
         listenHost: this.options.listenHost,
         listenPort: this.options.listenPort,
-        token: this.options.token,
+        auth,
         relay,
         webviewRoot: bundle.webviewRoot,
         readIncodexStylesheet: async () => readFile(incodexCssPath, "utf8"),
@@ -221,7 +224,9 @@ class ManagedIncodexRuntime extends EventEmitter implements IncodexRuntime {
       const serveUrls = getServeUrls({
         listenHost: this.options.listenHost,
         listenPort: listeningAddress.port,
-        token: this.options.token,
+        appendOpenUrlCredentials: (url) => {
+          auth.appendOpenUrlCredentials(url);
+        },
       });
 
       this.activeResources = {
@@ -356,6 +361,25 @@ function createInitialSnapshot(options: IncodexRuntimeOptions): IncodexSnapshot 
     networkUrl: null,
     state: "stopped",
     tokenConfigured: options.token.length > 0,
+  };
+}
+
+function createRuntimeAuthConfig(token: string): IncodexConfig {
+  const securityKey = token.trim();
+  return {
+    server: {
+      access: "local",
+    },
+    auth: {
+      mode: securityKey ? "key" : "no_auth",
+      otp: {
+        rotation: "startup",
+        ttlSeconds: 300,
+      },
+      key: {
+        secret: securityKey,
+      },
+    },
   };
 }
 

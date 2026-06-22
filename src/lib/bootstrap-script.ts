@@ -93,6 +93,28 @@ function bootstrapIncodexInBrowser(config: BootstrapScriptConfig): void {
     | { ok: true }
     | { ok: false; reason: "unauthorized" | "unavailable" };
 
+  type BrowserAuthMode = "no_auth" | "otp_code" | "key" | "code_and_key";
+
+  type BrowserAuthChallenge = {
+    mode: BrowserAuthMode;
+    requiresKey: boolean;
+    requiresOtpCode: boolean;
+    otpRotation: "startup" | "interval";
+    otpTtlSeconds: number;
+    otpExpiresAt: number | null;
+  };
+
+  type BrowserAuthCredentials = {
+    key: string;
+    otpCode: string;
+  };
+
+  type AuthPromptState = {
+    challenge: BrowserAuthChallenge;
+    message: string | null;
+    resolve: (credentials: BrowserAuthCredentials) => void;
+  };
+
   type WorkerMessageListener = (message: unknown) => void;
 
   type BrowserDebugEvent = {
@@ -126,6 +148,7 @@ function bootstrapIncodexInBrowser(config: BootstrapScriptConfig): void {
   const INCODEX_STYLESHEET_ID = "incodex-stylesheet";
   const INCODEX_SERVICE_WORKER_PATH = "/service-worker.js";
   const INCODEX_BROWSER_FILE_UPLOAD_PATH = "/incodex-browser-file";
+  const AUTH_CREDENTIALS_STORAGE_KEY = "__incodex_auth_credentials";
   const TOKEN_STORAGE_KEY = "__incodex_token";
   const DEBUG_STORAGE_KEY = "__incodex_debug";
   const DEBUG_QUERY_KEY = "incodexDebug";
@@ -140,6 +163,7 @@ function bootstrapIncodexInBrowser(config: BootstrapScriptConfig): void {
   const ENTER_BEHAVIOR_NEWLINE = "newline";
   const SOFT_KEYBOARD_INSET_THRESHOLD_PX = 120;
   const RETRY_DELAYS_MS = [1000, 2000, 5000, 8000, 12000] as const;
+  const AUTH_INFO_PATH = "/auth-info";
   const SESSION_CHECK_PATH = "/session-check";
   const MOBILE_SIDEBAR_MEDIA_QUERY = "(max-width: 640px), (pointer: coarse) and (max-width: 900px)";
   const MOBILE_VIEWPORT_HEIGHT_CSS_VARIABLE = "--incodex-mobile-viewport-height";
@@ -170,6 +194,7 @@ function bootstrapIncodexInBrowser(config: BootstrapScriptConfig): void {
   const recentDebugEvents: BrowserDebugEvent[] = [];
   const toastHost = document.createElement("div");
   const statusHost = document.createElement("div");
+  const authHost = document.createElement("div");
   const importHost = document.createElement("div");
   const workspaceRootPickerHost = document.createElement("div");
   const mobileSidePanelCloseButton = document.createElement("button");
@@ -211,6 +236,7 @@ function bootstrapIncodexInBrowser(config: BootstrapScriptConfig): void {
   let mobileSidePanelSyncTimer: number | null = null;
   let isClosingMobileSidePanel = false;
   let isMobileSidePanelDismissed = false;
+  let authPromptState: AuthPromptState | null = null;
   let workspaceRootPickerState: WorkspaceRootPickerState | null = null;
   let serviceWorkerDebugState: ServiceWorkerDebugState = {
     status: "pending",
@@ -220,6 +246,8 @@ function bootstrapIncodexInBrowser(config: BootstrapScriptConfig): void {
   installCryptoRandomUuidFallback();
   toastHost.id = "incodex-toast-host";
   statusHost.id = "incodex-status-host";
+  authHost.id = "incodex-auth-host";
+  authHost.hidden = true;
   importHost.id = "incodex-import-host";
   importHost.hidden = true;
   workspaceRootPickerHost.id = "incodex-workspace-root-picker-host";
@@ -233,10 +261,10 @@ function bootstrapIncodexInBrowser(config: BootstrapScriptConfig): void {
   mobileSidePanelOpenButton.type = "button";
   mobileSidePanelOpenButton.hidden = true;
   mobileSidePanelOpenButton.setAttribute("aria-label", "Open side panel");
-  mobileSidePanelOpenButton.textContent = "Open";
+  mobileSidePanelOpenButton.textContent = "";
   document.documentElement.dataset.incodex = "true";
   resetClientStartupStateIfRequested();
-  getStoredToken();
+  getStoredAuthCredentials();
   restoreStoredRouteIfNeeded();
   normalizeBrowserUrlForRefresh();
   syncRouteDataset();
@@ -250,6 +278,7 @@ function bootstrapIncodexInBrowser(config: BootstrapScriptConfig): void {
     ensureStylesheetLink(config.stylesheetHref);
     ensureHostAttached(toastHost);
     ensureHostAttached(statusHost);
+    ensureHostAttached(authHost);
     ensureHostAttached(workspaceRootPickerHost);
     ensureHostAttached(mobileSidePanelCloseButton);
     ensureHostAttached(mobileSidePanelOpenButton);
@@ -713,9 +742,27 @@ function bootstrapIncodexInBrowser(config: BootstrapScriptConfig): void {
     }
   }
 
-  function readStoredTokenValue(storageName: "localStorage" | "sessionStorage"): string {
-    const storedValue = getStorage(storageName)?.getItem(TOKEN_STORAGE_KEY)?.trim();
-    return storedValue ? storedValue : "";
+  function readStoredAuthCredentialsValue(
+    storageName: "localStorage" | "sessionStorage",
+  ): BrowserAuthCredentials {
+    const storage = getStorage(storageName);
+    const storedValue = storage?.getItem(AUTH_CREDENTIALS_STORAGE_KEY)?.trim();
+    if (storedValue) {
+      try {
+        const parsed = JSON.parse(storedValue) as unknown;
+        if (isRecord(parsed)) {
+          return normalizeAuthCredentials({
+            key: typeof parsed.key === "string" ? parsed.key : "",
+            otpCode: typeof parsed.otpCode === "string" ? parsed.otpCode : "",
+          });
+        }
+      } catch {
+        // Ignore invalid stored credentials and fall back to legacy token storage.
+      }
+    }
+
+    const legacyToken = storage?.getItem(TOKEN_STORAGE_KEY)?.trim() ?? "";
+    return normalizeAuthCredentials({ key: legacyToken, otpCode: "" });
   }
 
   function resetClientStartupStateIfRequested(): void {
@@ -734,7 +781,9 @@ function bootstrapIncodexInBrowser(config: BootstrapScriptConfig): void {
         continue;
       }
 
+      storage.removeItem(AUTH_CREDENTIALS_STORAGE_KEY);
       storage.removeItem(LAST_ROUTE_STORAGE_KEY);
+      storage.removeItem(TOKEN_STORAGE_KEY);
       storage.removeItem(LEGACY_SIDEBAR_MODE_PERSISTED_ATOM_KEY);
     }
 
@@ -742,6 +791,10 @@ function bootstrapIncodexInBrowser(config: BootstrapScriptConfig): void {
     const nextUrl = new URL(currentUrl.toString());
     nextUrl.pathname = getServedPathname(currentUrl);
     nextUrl.searchParams.delete(RESET_QUERY_KEY);
+    nextUrl.searchParams.delete("key");
+    nextUrl.searchParams.delete("otp");
+    nextUrl.searchParams.delete("otp_code");
+    nextUrl.searchParams.delete("token");
     nextUrl.searchParams.delete(THREAD_QUERY_KEY);
     nextUrl.searchParams.delete(LEGACY_INITIAL_ROUTE_QUERY_KEY);
     if (nextUrl.toString() !== currentUrl.toString()) {
@@ -760,24 +813,32 @@ function bootstrapIncodexInBrowser(config: BootstrapScriptConfig): void {
     );
   }
 
-  function persistSessionToken(token: string): void {
+  function persistAuthCredentials(credentials: BrowserAuthCredentials): void {
+    const normalized = normalizeAuthCredentials(credentials);
     for (const storageName of ["sessionStorage", "localStorage"] as const) {
       const storage = getStorage(storageName);
       if (!storage) {
         continue;
       }
 
-      if (token) {
-        storage.setItem(TOKEN_STORAGE_KEY, token);
+      if (normalized.key || normalized.otpCode) {
+        storage.setItem(AUTH_CREDENTIALS_STORAGE_KEY, JSON.stringify(normalized));
+        storage.removeItem?.(TOKEN_STORAGE_KEY);
         continue;
       }
 
       if (typeof storage.removeItem === "function") {
+        storage.removeItem(AUTH_CREDENTIALS_STORAGE_KEY);
         storage.removeItem(TOKEN_STORAGE_KEY);
       } else {
+        storage.setItem(AUTH_CREDENTIALS_STORAGE_KEY, "");
         storage.setItem(TOKEN_STORAGE_KEY, "");
       }
     }
+  }
+
+  function clearAuthCredentials(): void {
+    persistAuthCredentials({ key: "", otpCode: "" });
   }
 
   async function handleBrowserBackedFetch(message: unknown): Promise<boolean> {
@@ -899,10 +960,7 @@ function bootstrapIncodexInBrowser(config: BootstrapScriptConfig): void {
   }> {
     const uploadUrl = new URL(INCODEX_BROWSER_FILE_UPLOAD_PATH, window.location.href);
     uploadUrl.searchParams.set("name", file.name || "attachment");
-    const token = getStoredToken();
-    if (token) {
-      uploadUrl.searchParams.set("token", token);
-    }
+    appendAuthCredentials(uploadUrl, getStoredAuthCredentials());
 
     const response = await nativeFetch(uploadUrl.toString(), {
       method: "POST",
@@ -1033,6 +1091,162 @@ function bootstrapIncodexInBrowser(config: BootstrapScriptConfig): void {
     statusHost.hidden = true;
     delete statusHost.dataset.mode;
     statusHost.replaceChildren();
+  }
+
+  function showAuthDialog(
+    challenge: BrowserAuthChallenge,
+    message: string | null,
+  ): Promise<BrowserAuthCredentials> {
+    return new Promise((resolve) => {
+      authPromptState = {
+        challenge,
+        message,
+        resolve,
+      };
+      renderAuthDialog(getStoredAuthCredentials());
+    });
+  }
+
+  function clearAuthDialog(): void {
+    authPromptState = null;
+    authHost.hidden = true;
+    authHost.replaceChildren();
+  }
+
+  function renderAuthDialog(initialCredentials: BrowserAuthCredentials): void {
+    const state = authPromptState;
+    if (!state) {
+      clearAuthDialog();
+      return;
+    }
+
+    ensureHostAttached(authHost);
+    authHost.hidden = false;
+    authHost.replaceChildren();
+
+    const backdrop = document.createElement("div");
+    backdrop.dataset.incodexAuthBackdrop = "true";
+
+    const dialog = document.createElement("form");
+    dialog.dataset.incodexAuthDialog = "true";
+    dialog.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const formData = new FormData(dialog);
+      state.resolve(
+        normalizeAuthCredentials({
+          key: String(formData.get("key") ?? ""),
+          otpCode: String(formData.get("otpCode") ?? ""),
+        }),
+      );
+    });
+
+    const header = document.createElement("div");
+    header.dataset.incodexAuthHeader = "true";
+
+    const title = document.createElement("h2");
+    title.textContent = "Unlock Incodex";
+
+    const summary = document.createElement("p");
+    summary.textContent = getAuthDialogSummary(state.challenge);
+    header.append(title, summary);
+
+    const fields = document.createElement("div");
+    fields.dataset.incodexAuthFields = "true";
+
+    if (state.challenge.requiresKey) {
+      fields.appendChild(
+        createAuthInput({
+          label: "Security key",
+          name: "key",
+          type: "password",
+          value: initialCredentials.key,
+          autocomplete: "current-password",
+        }),
+      );
+    }
+
+    if (state.challenge.requiresOtpCode) {
+      fields.appendChild(
+        createAuthInput({
+          label: "6-digit code",
+          name: "otpCode",
+          type: "text",
+          value: initialCredentials.otpCode,
+          autocomplete: "one-time-code",
+          inputMode: "numeric",
+          maxLength: 6,
+          pattern: "\\d{6}",
+        }),
+      );
+    }
+
+    const error = document.createElement("p");
+    error.dataset.incodexAuthError = "true";
+    error.hidden = !state.message;
+    error.textContent = state.message ?? "";
+
+    const submitButton = document.createElement("button");
+    submitButton.type = "submit";
+    submitButton.dataset.incodexAuthSubmit = "true";
+    submitButton.textContent = "Continue";
+
+    dialog.append(header, fields, error, submitButton);
+    backdrop.appendChild(dialog);
+    authHost.appendChild(backdrop);
+
+    const firstInput = dialog.querySelector("input");
+    if (firstInput instanceof HTMLInputElement) {
+      window.setTimeout(() => firstInput.focus(), 0);
+    }
+  }
+
+  function createAuthInput(options: {
+    autocomplete: string;
+    inputMode?: string;
+    label: string;
+    maxLength?: number;
+    name: string;
+    pattern?: string;
+    type: string;
+    value: string;
+  }): HTMLElement {
+    const label = document.createElement("label");
+    label.dataset.incodexAuthField = "true";
+
+    const text = document.createElement("span");
+    text.textContent = options.label;
+
+    const input = document.createElement("input");
+    input.name = options.name;
+    input.type = options.type;
+    input.value = options.value;
+    input.setAttribute("autocomplete", options.autocomplete);
+    input.required = true;
+    if (options.inputMode) {
+      input.inputMode = options.inputMode;
+    }
+    if (options.maxLength) {
+      input.maxLength = options.maxLength;
+    }
+    if (options.pattern) {
+      input.pattern = options.pattern;
+    }
+
+    label.append(text, input);
+    return label;
+  }
+
+  function getAuthDialogSummary(challenge: BrowserAuthChallenge): string {
+    if (challenge.mode === "code_and_key") {
+      return "Enter the security key and the current 6-digit code.";
+    }
+    if (challenge.mode === "key") {
+      return "Enter the configured security key.";
+    }
+    if (challenge.otpRotation === "interval") {
+      return `Enter the current 6-digit code. It refreshes every ${challenge.otpTtlSeconds} seconds.`;
+    }
+    return "Enter the 6-digit code printed by the Incodex process.";
   }
 
   function setConnectionPhase(
@@ -2520,14 +2734,6 @@ function bootstrapIncodexInBrowser(config: BootstrapScriptConfig): void {
     pathInput.disabled = isBusy;
     pathInput.dataset.incodexWorkspaceRootPickerPathInput = "true";
 
-    const openButton = document.createElement("button");
-    openButton.type = "button";
-    openButton.dataset.incodexWorkspaceRootPickerOpenButton = "true";
-    openButton.textContent = state.isLoading ? "Loading..." : "Open";
-    openButton.addEventListener("click", () => {
-      void submitWorkspaceRootPickerPathInput();
-    });
-
     const newFolderButton = document.createElement("button");
     newFolderButton.type = "button";
     newFolderButton.dataset.incodexWorkspaceRootPickerNewFolderButton = "true";
@@ -2540,7 +2746,6 @@ function bootstrapIncodexInBrowser(config: BootstrapScriptConfig): void {
 
     const syncPathActionButtons = (): void => {
       const currentState = workspaceRootPickerState ?? state;
-      openButton.disabled = isBusy || currentState.pathInputValue.trim().length === 0;
       newFolderButton.disabled =
         isBusy ||
         !canCreateWorkspaceRootPickerDirectory(
@@ -2566,7 +2771,7 @@ function bootstrapIncodexInBrowser(config: BootstrapScriptConfig): void {
     syncPathActionButtons();
 
     pathLabel.appendChild(pathInput);
-    pathForm.append(pathLabel, openButton, newFolderButton);
+    pathForm.append(pathLabel);
 
     const content = document.createElement("div");
     content.dataset.incodexWorkspaceRootPickerContent = "true";
@@ -2593,7 +2798,7 @@ function bootstrapIncodexInBrowser(config: BootstrapScriptConfig): void {
       }> = [];
       if (state.parentPath) {
         rows.push({
-          label: "..",
+          label: "Parent folder",
           path: state.parentPath,
           isParent: true,
         });
@@ -2651,7 +2856,7 @@ function bootstrapIncodexInBrowser(config: BootstrapScriptConfig): void {
       void confirmWorkspaceRootPickerSelection();
     });
 
-    footer.append(cancelButton, useFolderButton);
+    footer.append(cancelButton, newFolderButton, useFolderButton);
     dialog.append(header, pathForm, content, footer);
     backdrop.appendChild(dialog);
     backdrop.addEventListener("click", (event) => {
@@ -3934,6 +4139,13 @@ function bootstrapIncodexInBrowser(config: BootstrapScriptConfig): void {
       !hasNonLocalLegacyInitialRoute
     ) {
       clearThreadQuery();
+      return;
+    }
+
+    if (hasAuthQueryParams(currentUrl)) {
+      const nextUrl = new URL(currentUrl.toString());
+      stripAuthQueryParams(nextUrl);
+      window.history.replaceState(null, "", nextUrl.toString());
     }
   }
 
@@ -3950,6 +4162,22 @@ function bootstrapIncodexInBrowser(config: BootstrapScriptConfig): void {
     return url.pathname === INDEX_HTML_PATHNAME ? INDEX_HTML_PATHNAME : "/";
   }
 
+  function hasAuthQueryParams(url: URL): boolean {
+    return (
+      url.searchParams.has("key") ||
+      url.searchParams.has("otp") ||
+      url.searchParams.has("otp_code") ||
+      url.searchParams.has("token")
+    );
+  }
+
+  function stripAuthQueryParams(url: URL): void {
+    url.searchParams.delete("key");
+    url.searchParams.delete("otp");
+    url.searchParams.delete("otp_code");
+    url.searchParams.delete("token");
+  }
+
   function replaceThreadQuery(
     conversationId: string | null,
     options: {
@@ -3959,6 +4187,7 @@ function bootstrapIncodexInBrowser(config: BootstrapScriptConfig): void {
     const currentUrl = new URL(window.location.href);
     const nextUrl = new URL(currentUrl.toString());
     nextUrl.pathname = getServedPathname(currentUrl);
+    stripAuthQueryParams(nextUrl);
     if (!options.preserveLegacyInitialRoute) {
       nextUrl.searchParams.delete(LEGACY_INITIAL_ROUTE_QUERY_KEY);
     }
@@ -4282,14 +4511,52 @@ function bootstrapIncodexInBrowser(config: BootstrapScriptConfig): void {
     replayRestorableTerminalAttachments();
   }
 
-  function getStoredToken(): string {
+  function getStoredAuthCredentials(): BrowserAuthCredentials {
     const url = new URL(window.location.href);
-    const tokenFromQuery = url.searchParams.get("token")?.trim();
-    if (tokenFromQuery) {
-      persistSessionToken(tokenFromQuery);
-      return tokenFromQuery;
+    const credentialsFromQuery = normalizeAuthCredentials({
+      key: (url.searchParams.get("key") ?? url.searchParams.get("token") ?? "").trim(),
+      otpCode: (url.searchParams.get("otp_code") ?? url.searchParams.get("otp") ?? "").trim(),
+    });
+    if (credentialsFromQuery.key || credentialsFromQuery.otpCode) {
+      persistAuthCredentials(credentialsFromQuery);
+      return credentialsFromQuery;
     }
-    return readStoredTokenValue("sessionStorage") || readStoredTokenValue("localStorage");
+
+    const sessionCredentials = readStoredAuthCredentialsValue("sessionStorage");
+    if (sessionCredentials.key || sessionCredentials.otpCode) {
+      return sessionCredentials;
+    }
+    return readStoredAuthCredentialsValue("localStorage");
+  }
+
+  function normalizeAuthCredentials(credentials: BrowserAuthCredentials): BrowserAuthCredentials {
+    return {
+      key: credentials.key.trim(),
+      otpCode: credentials.otpCode.trim(),
+    };
+  }
+
+  function hasRequiredAuthCredentials(
+    challenge: BrowserAuthChallenge,
+    credentials: BrowserAuthCredentials,
+  ): boolean {
+    if (challenge.requiresKey && credentials.key.length === 0) {
+      return false;
+    }
+    if (challenge.requiresOtpCode && !/^\d{6}$/.test(credentials.otpCode)) {
+      return false;
+    }
+    return true;
+  }
+
+  function appendAuthCredentials(url: URL, credentials: BrowserAuthCredentials): void {
+    const normalized = normalizeAuthCredentials(credentials);
+    if (normalized.key) {
+      url.searchParams.set("key", normalized.key);
+    }
+    if (normalized.otpCode) {
+      url.searchParams.set("otp_code", normalized.otpCode);
+    }
   }
 
   async function registerPwaServiceWorker(): Promise<void> {
@@ -4440,6 +4707,9 @@ function bootstrapIncodexInBrowser(config: BootstrapScriptConfig): void {
 
   function buildRestorableRoute(href: string): string {
     const url = new URL(href);
+    url.searchParams.delete("key");
+    url.searchParams.delete("otp");
+    url.searchParams.delete("otp_code");
     url.searchParams.delete("token");
     url.searchParams.delete(THREAD_QUERY_KEY);
     url.searchParams.delete(LEGACY_INITIAL_ROUTE_QUERY_KEY);
@@ -4472,26 +4742,79 @@ function bootstrapIncodexInBrowser(config: BootstrapScriptConfig): void {
     }
   }
 
-  function getSocketUrl(token: string): string {
+  async function fetchAuthChallenge(): Promise<BrowserAuthChallenge | null> {
+    try {
+      const response = await window.fetch(AUTH_INFO_PATH, {
+        cache: "no-store",
+        credentials: "same-origin",
+      });
+      if (!response.ok) {
+        return null;
+      }
+      const payload = (await response.json()) as unknown;
+      const auth = isRecord(payload) ? payload.auth : null;
+      if (!isAuthChallenge(auth)) {
+        return null;
+      }
+      return auth;
+    } catch {
+      return null;
+    }
+  }
+
+  async function resolveAuthorizedCredentials(): Promise<BrowserAuthCredentials | null> {
+    const challenge = await fetchAuthChallenge();
+    if (!challenge) {
+      return null;
+    }
+
+    if (challenge.mode === "no_auth") {
+      clearAuthDialog();
+      return { key: "", otpCode: "" };
+    }
+
+    let credentials = getStoredAuthCredentials();
+    let message: string | null = null;
+    for (;;) {
+      if (!hasRequiredAuthCredentials(challenge, credentials)) {
+        credentials = await showAuthDialog(challenge, message);
+      }
+
+      const validation = await validateSessionCredentials(credentials);
+      if (validation.ok) {
+        persistAuthCredentials(credentials);
+        clearAuthDialog();
+        return credentials;
+      }
+
+      if (validation.reason === "unavailable") {
+        return null;
+      }
+
+      clearAuthCredentials();
+      credentials = { key: "", otpCode: "" };
+      message = "Those credentials were rejected. Check the current Incodex code or security key.";
+    }
+  }
+
+  function getSocketUrl(credentials: BrowserAuthCredentials): string {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const url = new URL(`${protocol}//${window.location.host}/session`);
-    if (token) {
-      url.searchParams.set("token", token);
-    }
+    appendAuthCredentials(url, credentials);
     return url.toString();
   }
 
-  function getSessionCheckUrl(token: string): string {
+  function getSessionCheckUrl(credentials: BrowserAuthCredentials): string {
     const url = new URL(SESSION_CHECK_PATH, window.location.href);
-    if (token) {
-      url.searchParams.set("token", token);
-    }
+    appendAuthCredentials(url, credentials);
     return `${url.pathname}${url.search}`;
   }
 
-  async function validateSessionToken(token: string): Promise<SessionValidationResult> {
+  async function validateSessionCredentials(
+    credentials: BrowserAuthCredentials,
+  ): Promise<SessionValidationResult> {
     try {
-      const response = await window.fetch(getSessionCheckUrl(token), {
+      const response = await window.fetch(getSessionCheckUrl(credentials), {
         cache: "no-store",
         credentials: "same-origin",
       });
@@ -4506,6 +4829,26 @@ function bootstrapIncodexInBrowser(config: BootstrapScriptConfig): void {
     } catch {
       return { ok: false, reason: "unavailable" };
     }
+  }
+
+  function isAuthChallenge(value: unknown): value is BrowserAuthChallenge {
+    if (!isRecord(value)) {
+      return false;
+    }
+    return (
+      isAuthMode(value.mode) &&
+      typeof value.requiresKey === "boolean" &&
+      typeof value.requiresOtpCode === "boolean" &&
+      (value.otpRotation === "startup" || value.otpRotation === "interval") &&
+      typeof value.otpTtlSeconds === "number" &&
+      (typeof value.otpExpiresAt === "number" || value.otpExpiresAt === null)
+    );
+  }
+
+  function isAuthMode(value: unknown): value is BrowserAuthMode {
+    return (
+      value === "no_auth" || value === "otp_code" || value === "key" || value === "code_and_key"
+    );
   }
 
   function clearReconnectTimer(): void {
@@ -4781,19 +5124,16 @@ function bootstrapIncodexInBrowser(config: BootstrapScriptConfig): void {
       return;
     }
 
-    const token = getStoredToken();
     isConnecting = true;
     clearReconnectTimer();
     browserDebugLog("connect socket start", {
       hasConnected,
       queuedCount: pendingMessages.length,
-      hasToken: token.length > 0,
     });
     rememberBrowserDebugEvent("socket", {
       type: "connect-start",
       hasConnected,
       queuedCount: pendingMessages.length,
-      hasToken: token.length > 0,
     });
     setConnectionPhase(
       "reconnecting",
@@ -4801,20 +5141,9 @@ function bootstrapIncodexInBrowser(config: BootstrapScriptConfig): void {
       { mode: "passive" },
     );
 
-    const validation = await validateSessionToken(token);
-    if (!validation.ok) {
+    const credentials = await resolveAuthorizedCredentials();
+    if (!credentials) {
       isConnecting = false;
-      browserDebugLog("session validation failed", validation);
-      if (validation.reason === "unauthorized") {
-        persistSessionToken("");
-        setConnectionPhase(
-          "reload-required",
-          token
-            ? "Incodex rejected this token. Open the exact URL printed by the CLI for the current run."
-            : "Incodex requires a token. Open the exact URL printed by the CLI for the current run.",
-        );
-        return;
-      }
       scheduleReconnect("Incodex is unavailable. Retrying...", {
         passive: true,
         suppressEscalation: !isDocumentVisible() || !isNetworkOnline(),
@@ -4823,7 +5152,7 @@ function bootstrapIncodexInBrowser(config: BootstrapScriptConfig): void {
     }
 
     enterWakeGracePeriod();
-    socket = new WebSocket(getSocketUrl(token));
+    socket = new WebSocket(getSocketUrl(credentials));
     socket.addEventListener("open", () => {
       const isReconnectOpen = hasConnected;
       isConnecting = false;
@@ -4856,7 +5185,7 @@ function bootstrapIncodexInBrowser(config: BootstrapScriptConfig): void {
       if (!hasConnected) {
         setConnectionPhase(
           "reload-required",
-          "Incodex could not open its live session. Check the CLI output and the page token.",
+          "Incodex could not open its live session. Check the CLI output and authentication details.",
         );
       }
     });

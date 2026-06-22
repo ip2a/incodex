@@ -15,6 +15,7 @@ import { randomUUID } from "node:crypto";
 import mimeTypes from "mime-types";
 import { WebSocket, WebSocketServer } from "ws";
 
+import { readAuthCredentialsFromUrl } from "./auth.js";
 import { debugLog, isDebugEnabled } from "./debug.js";
 import { getUnsupportedBridgeNotice } from "./native-policy.js";
 import type {
@@ -193,11 +194,19 @@ export class IncodexServer {
     }
 
     if (url.pathname === "/session-check") {
-      const authorized = this.isAuthorized(url.searchParams.get("token"));
+      const authorized = this.isAuthorized(url);
       response.statusCode = authorized ? 200 : 401;
       response.setHeader("Cache-Control", "no-store");
       response.setHeader("Content-Type", "application/json; charset=utf-8");
       response.end(JSON.stringify({ ok: authorized }));
+      return;
+    }
+
+    if (url.pathname === "/auth-info") {
+      response.statusCode = 200;
+      response.setHeader("Cache-Control", "no-store");
+      response.setHeader("Content-Type", "application/json; charset=utf-8");
+      response.end(JSON.stringify({ auth: this.options.auth.getChallenge() }));
       return;
     }
 
@@ -291,7 +300,7 @@ export class IncodexServer {
       return;
     }
 
-    if (!this.isAuthorized(url.searchParams.get("token"))) {
+    if (!this.isAuthorized(url)) {
       response.statusCode = 401;
       response.setHeader("Content-Type", "application/json; charset=utf-8");
       response.end(JSON.stringify({ error: "Unauthorized." }));
@@ -341,7 +350,7 @@ export class IncodexServer {
       return;
     }
 
-    if (!this.isAuthorized(url.searchParams.get("token"))) {
+    if (!this.isAuthorized(url)) {
       socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
       socket.destroy();
       return;
@@ -386,8 +395,8 @@ export class IncodexServer {
     });
   }
 
-  private isAuthorized(requestToken: string | null): boolean {
-    return this.options.token.length === 0 || requestToken === this.options.token;
+  private isAuthorized(url: URL): boolean {
+    return this.options.auth.authorize(readAuthCredentialsFromUrl(url));
   }
 
   private async handleSocketMessage(session: BrowserSession, raw: string): Promise<void> {

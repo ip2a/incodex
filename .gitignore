@@ -13,6 +13,8 @@
 !/scripts/**
 !/src/
 !/src/**
+!/test/
+!/test/**
 !/tsconfig.json
 
 .DS_Store

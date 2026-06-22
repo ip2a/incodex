@@ -192,6 +192,120 @@ html[data-incodex="true"]
   background: var(--incodex-button-primary-hover);
 }
 
+html[data-incodex="true"] #incodex-auth-host {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483647;
+}
+
+html[data-incodex="true"] #incodex-auth-host[hidden] {
+  display: none;
+}
+
+html[data-incodex="true"] [data-incodex-auth-backdrop] {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: clamp(16px, 4vw, 32px);
+  background: var(--incodex-overlay-scrim);
+  backdrop-filter: blur(14px);
+}
+
+html[data-incodex="true"] [data-incodex-auth-dialog] {
+  width: min(420px, calc(100vw - 32px));
+  display: grid;
+  gap: 16px;
+  padding: 22px;
+  border: 1px solid var(--incodex-border);
+  border-radius: var(--incodex-radius-lg);
+  background: var(--incodex-surface-bg);
+  color: var(--incodex-text);
+  box-shadow: var(--incodex-shadow);
+}
+
+html[data-incodex="true"] [data-incodex-auth-header] {
+  display: grid;
+  gap: 6px;
+}
+
+html[data-incodex="true"] [data-incodex-auth-header] h2,
+html[data-incodex="true"] [data-incodex-auth-header] p,
+html[data-incodex="true"] [data-incodex-auth-error] {
+  margin: 0;
+}
+
+html[data-incodex="true"] [data-incodex-auth-header] h2 {
+  font-size: var(--text-xl, 20px);
+  font-weight: 650;
+  line-height: 1.2;
+}
+
+html[data-incodex="true"] [data-incodex-auth-header] p {
+  color: var(--incodex-text-secondary);
+  font-size: var(--text-base, 13px);
+  line-height: 1.45;
+}
+
+html[data-incodex="true"] [data-incodex-auth-fields] {
+  display: grid;
+  gap: 12px;
+}
+
+html[data-incodex="true"] [data-incodex-auth-field] {
+  display: grid;
+  gap: 6px;
+  color: var(--incodex-text-secondary);
+  font-size: var(--text-sm, 12px);
+  font-weight: 600;
+}
+
+html[data-incodex="true"] [data-incodex-auth-field] input {
+  min-height: 42px;
+  width: 100%;
+  padding: 8px 11px;
+  border: 1px solid var(--incodex-border-light);
+  border-radius: var(--incodex-radius-sm);
+  background: var(--incodex-surface-subtle);
+  color: var(--incodex-text);
+  font: inherit;
+  font-size: var(--text-base, 13px);
+  outline: none;
+}
+
+html[data-incodex="true"] [data-incodex-auth-field] input:focus {
+  border-color: var(--incodex-focus);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--incodex-focus) 24%, transparent);
+}
+
+html[data-incodex="true"] [data-incodex-auth-error] {
+  color: var(--color-token-error-foreground, #d04444);
+  font-size: var(--text-sm, 12px);
+  line-height: 1.4;
+}
+
+html[data-incodex="true"] [data-incodex-auth-submit] {
+  min-height: 42px;
+  border: 1px solid transparent;
+  border-radius: var(--incodex-radius-sm);
+  background: var(--incodex-button-primary-bg);
+  color: var(--incodex-button-primary-fg);
+  font: inherit;
+  font-size: var(--text-base, 13px);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+html[data-incodex="true"] [data-incodex-auth-submit]:hover {
+  background: var(--incodex-button-primary-hover);
+}
+
+html[data-incodex="true"] [data-incodex-auth-submit]:focus-visible {
+  outline: 2px solid var(--incodex-focus);
+  outline-offset: 2px;
+}
+
 html[data-incodex="true"] #incodex-workspace-root-picker-host {
   position: fixed;
   inset: 0;
@@ -231,22 +345,29 @@ html[data-incodex="true"] [data-incodex-workspace-root-picker-backdrop] {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 24px;
-  background: var(--incodex-overlay-scrim);
-  backdrop-filter: blur(12px);
+  padding: clamp(16px, 4vw, 32px);
+  background:
+    radial-gradient(
+      circle at top,
+      color-mix(in srgb, var(--incodex-accent) 14%, transparent),
+      transparent 36%
+    ),
+    var(--incodex-overlay-scrim);
+  backdrop-filter: blur(14px);
   pointer-events: auto;
+  overflow: hidden;
 }
 
 html[data-incodex="true"] [data-incodex-workspace-root-picker-dialog] {
-  width: min(860px, calc(100vw - 32px));
-  max-height: min(760px, calc(100vh - 48px));
-  display: flex;
-  flex-direction: column;
+  width: min(720px, calc(100vw - 32px));
+  max-height: min(720px, calc(100dvh - 48px));
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   gap: 16px;
-  padding: calc(var(--spacing, 4px) * 5);
+  padding: 20px;
   border: 1px solid var(--incodex-border);
   border-radius: var(--incodex-radius-lg);
-  background: var(--incodex-surface-bg);
+  background: color-mix(in srgb, var(--incodex-surface-bg) 98%, transparent);
   color: var(--incodex-text);
   box-shadow: var(--incodex-shadow);
   backdrop-filter: blur(16px);
@@ -279,20 +400,20 @@ html[data-incodex="true"] [data-incodex-workspace-root-picker-header] p {
   line-height: 1.45;
 }
 
-html[data-incodex="true"] [data-incodex-workspace-root-picker-open-button],
 html[data-incodex="true"] [data-incodex-workspace-root-picker-new-folder-button],
 html[data-incodex="true"] [data-incodex-workspace-root-picker-cancel-button],
 html[data-incodex="true"] [data-incodex-workspace-root-picker-use-folder-button] {
-  min-height: 34px;
-  padding: 6px 12px;
+  min-height: 38px;
+  padding: 8px 14px;
   border: 1px solid var(--incodex-border-light);
   border-radius: var(--incodex-radius-sm);
-  background: var(--incodex-surface-subtle);
-  color: var(--incodex-text-secondary);
-  font-family: var(--font-mono, var(--vscode-editor-font-family, monospace));
-  font-size: var(--text-sm, 12px);
-  line-height: 1.45;
-  word-break: break-all;
+  background: var(--incodex-button-secondary-bg);
+  color: var(--incodex-text);
+  font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
+  font-size: var(--text-base, 13px);
+  font-weight: 600;
+  line-height: 1.35;
+  white-space: nowrap;
 }
 
 html[data-incodex="true"] input[data-incodex-import-path] {
@@ -710,7 +831,6 @@ html[data-incodex="true"] [data-incodex-import-actions] button {
     opacity 120ms ease;
 }
 
-html[data-incodex="true"] [data-incodex-workspace-root-picker-open-button],
 html[data-incodex="true"] [data-incodex-workspace-root-picker-new-folder-button],
 html[data-incodex="true"] [data-incodex-workspace-root-picker-cancel-button],
 html[data-incodex="true"] [data-incodex-workspace-root-picker-use-folder-button],
@@ -724,7 +844,6 @@ html[data-incodex="true"] [data-incodex-workspace-root-picker-use-folder-button]
   color: var(--incodex-button-primary-fg);
 }
 
-html[data-incodex="true"] [data-incodex-workspace-root-picker-open-button]:disabled,
 html[data-incodex="true"] [data-incodex-workspace-root-picker-new-folder-button]:disabled,
 html[data-incodex="true"] [data-incodex-workspace-root-picker-cancel-button]:disabled,
 html[data-incodex="true"] [data-incodex-workspace-root-picker-use-folder-button]:disabled,
@@ -733,11 +852,11 @@ html[data-incodex="true"] [data-incodex-workspace-root-picker-row]:disabled {
   opacity: 0.56;
 }
 
-html[data-incodex="true"] [data-incodex-workspace-root-picker-open-button]:hover:not(:disabled),
 html[data-incodex="true"]
   [data-incodex-workspace-root-picker-new-folder-button]:hover:not(:disabled),
 html[data-incodex="true"] [data-incodex-workspace-root-picker-cancel-button]:hover:not(:disabled),
 html[data-incodex="true"] [data-incodex-workspace-root-picker-row]:hover:not(:disabled) {
+  background: var(--incodex-list-hover);
   border-color: var(--incodex-border);
 }
 
@@ -793,7 +912,7 @@ html[data-incodex="true"]
 
 html[data-incodex="true"] [data-incodex-workspace-root-picker-path-form] {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 10px;
   align-items: end;
 }
@@ -835,27 +954,29 @@ html[data-incodex="true"] [data-incodex-workspace-root-picker-error] {
 }
 
 html[data-incodex="true"] [data-incodex-workspace-root-picker-list] {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-auto-rows: min-content;
   gap: 8px;
-  min-height: 220px;
+  min-height: 0;
   overflow: auto;
-  padding-right: 4px;
-  border-bottom: 1px solid var(--incodex-border-light);
+  padding: 2px 4px 8px 0;
   scrollbar-color: var(--color-token-scrollbar-slider-background, var(--incodex-border-heavy))
     transparent;
+  overscroll-behavior: contain;
 }
 
 html[data-incodex="true"] [data-incodex-workspace-root-picker-row] {
   width: 100%;
+  min-height: 44px;
   padding: 12px 14px;
   border: 1px solid var(--incodex-border-light);
   border-radius: var(--incodex-radius-md);
-  background: var(--incodex-surface-subtle);
+  background: color-mix(in srgb, var(--incodex-surface-subtle) 86%, transparent);
   color: var(--incodex-text);
   text-align: left;
   font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif);
   font-size: var(--text-base, 13px);
+  font-weight: 600;
   line-height: 1.35;
   transition:
     background-color 120ms ease,
@@ -878,10 +999,10 @@ html[data-incodex="true"] [data-incodex-workspace-root-picker-footer] {
   display: flex;
   justify-content: flex-end;
   gap: 10px;
-  padding-top: 4px;
+  padding-top: 14px;
+  border-top: 1px solid var(--incodex-border-light);
 }
 
-html[data-incodex="true"] [data-incodex-workspace-root-picker-open-button]:focus-visible,
 html[data-incodex="true"] [data-incodex-workspace-root-picker-new-folder-button]:focus-visible,
 html[data-incodex="true"] [data-incodex-workspace-root-picker-cancel-button]:focus-visible,
 html[data-incodex="true"] [data-incodex-workspace-root-picker-use-folder-button]:focus-visible,
@@ -963,6 +1084,97 @@ html[data-incodex="true"] [aria-label="Open in Popout Window"] {
       var(--incodex-mobile-shell-height) - env(safe-area-inset-top, 0px) -
         env(safe-area-inset-bottom, 0px)
     );
+  }
+
+  html[data-incodex="true"] [data-incodex-workspace-root-picker-backdrop] {
+    align-items: stretch;
+    justify-content: stretch;
+    padding: max(10px, env(safe-area-inset-top, 0px)) 10px
+      max(10px, env(safe-area-inset-bottom, 0px));
+    overflow: hidden;
+  }
+
+  html[data-incodex="true"] [data-incodex-workspace-root-picker-dialog] {
+    width: 100%;
+    max-height: none;
+    height: calc(
+      var(--incodex-mobile-shell-height) - max(10px, env(safe-area-inset-top, 0px)) -
+        max(10px, env(safe-area-inset-bottom, 0px))
+    );
+    grid-template-rows: auto auto minmax(0, 1fr) auto;
+    gap: 12px;
+    padding: 16px;
+    border-radius: 20px;
+  }
+
+  html[data-incodex="true"] [data-incodex-workspace-root-picker-header] {
+    gap: 4px;
+  }
+
+  html[data-incodex="true"] [data-incodex-workspace-root-picker-header] h2 {
+    font-size: 22px;
+  }
+
+  html[data-incodex="true"] [data-incodex-workspace-root-picker-header] p {
+    font-size: 13px;
+  }
+
+  html[data-incodex="true"] [data-incodex-workspace-root-picker-path-form] {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  html[data-incodex="true"] [data-incodex-workspace-root-picker-path-label] {
+    gap: 6px;
+  }
+
+  html[data-incodex="true"] [data-incodex-workspace-root-picker-path-input],
+  html[data-incodex="true"] [data-incodex-workspace-root-picker-new-folder-button],
+  html[data-incodex="true"] [data-incodex-workspace-root-picker-cancel-button],
+  html[data-incodex="true"] [data-incodex-workspace-root-picker-use-folder-button] {
+    min-height: 44px;
+  }
+
+  html[data-incodex="true"] [data-incodex-workspace-root-picker-new-folder-button] {
+    width: 100%;
+  }
+
+  html[data-incodex="true"] [data-incodex-workspace-root-picker-content] {
+    overflow: hidden;
+  }
+
+  html[data-incodex="true"] [data-incodex-workspace-root-picker-list] {
+    padding-right: 0;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  html[data-incodex="true"] [data-incodex-workspace-root-picker-row] {
+    min-height: 46px;
+    padding: 12px;
+  }
+
+  html[data-incodex="true"] [data-incodex-workspace-root-picker-footer] {
+    display: grid;
+    grid-template-columns: 1fr 1.35fr;
+    gap: 8px;
+    padding-top: 12px;
+  }
+
+  html[data-incodex="true"] [data-incodex-workspace-root-picker-cancel-button] {
+    grid-column: 1 / -1;
+    order: 1;
+  }
+
+  html[data-incodex="true"] [data-incodex-workspace-root-picker-new-folder-button] {
+    order: 2;
+  }
+
+  html[data-incodex="true"] [data-incodex-workspace-root-picker-use-folder-button] {
+    order: 3;
+  }
+
+  html[data-incodex="true"] [data-incodex-workspace-root-picker-footer] button {
+    width: 100%;
   }
 
   html[data-incodex="true"] .app-shell-left-panel {

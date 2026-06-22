@@ -16,8 +16,63 @@ export interface LoadedWorkspaceRootRegistry {
   state: WorkspaceRootRegistryState | null;
 }
 
+export interface WorkspaceRootImportCandidate {
+  root: string;
+  label: string;
+  active: boolean;
+  available: boolean;
+}
+
 export function deriveWorkspaceRootRegistryPath(): string {
   return join(deriveCodexHomePath(), "incodex", "workspace-roots.json");
+}
+
+export function mergeWorkspaceRootRegistryProjects(
+  state: WorkspaceRootRegistryState,
+  projects: WorkspaceRootImportCandidate[],
+): { state: WorkspaceRootRegistryState; changed: boolean } {
+  const roots = [...state.roots];
+  const labels = { ...state.labels };
+  let activeRoot = state.activeRoot && roots.includes(state.activeRoot) ? state.activeRoot : null;
+  let changed = activeRoot !== state.activeRoot;
+  let firstActiveImportedRoot: string | null = null;
+
+  for (const project of projects) {
+    const root = project.root.trim();
+    if (!root || !project.available) {
+      continue;
+    }
+
+    if (project.active && !firstActiveImportedRoot) {
+      firstActiveImportedRoot = root;
+    }
+
+    if (!roots.includes(root)) {
+      roots.push(root);
+      changed = true;
+    }
+
+    const label = project.label.trim();
+    if (label && !labels[root]) {
+      labels[root] = label;
+      changed = true;
+    }
+  }
+
+  if (!activeRoot && firstActiveImportedRoot && roots.includes(firstActiveImportedRoot)) {
+    activeRoot = firstActiveImportedRoot;
+    changed = true;
+  }
+
+  return {
+    state: {
+      roots,
+      labels,
+      activeRoot,
+      desktopImportPromptSeen: state.desktopImportPromptSeen,
+    },
+    changed,
+  };
 }
 
 export async function loadWorkspaceRootRegistry(

@@ -141,6 +141,7 @@ function registerIncodexServiceWorker(config: ServiceWorkerRuntimeConfig): void 
   const cachePrefix = "incodex-shell:";
   const staticDestinations = new Set(["font", "image", "script", "style"]);
   const bypassPaths = new Set([
+    "/auth-info",
     "/healthz",
     "/ipc-request",
     "/manifest.webmanifest",
@@ -191,7 +192,12 @@ function registerIncodexServiceWorker(config: ServiceWorkerRuntimeConfig): void 
       return;
     }
 
-    if (url.searchParams.has("token")) {
+    if (
+      url.searchParams.has("key") ||
+      url.searchParams.has("otp_code") ||
+      url.searchParams.has("otp") ||
+      url.searchParams.has("token")
+    ) {
       return;
     }
 

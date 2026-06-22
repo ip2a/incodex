@@ -5,7 +5,7 @@ interface ServeUrlOptions {
   listenHost: string;
   listenPort: number;
   protocol?: "http" | "https";
-  token: string;
+  appendOpenUrlCredentials?: (url: URL) => void;
   interfacesByName?: NodeJS.Dict<NetworkInterfaceInfo[]>;
 }
 
@@ -31,10 +31,15 @@ export function getServeUrls(options: ServeUrlOptions): ServeUrls {
 
   return {
     localUrl: buildServeUrl(protocol, localHost, options.listenPort),
-    localOpenUrl: buildOpenUrl(protocol, localHost, options.listenPort, options.token),
+    localOpenUrl: buildOpenUrl(
+      protocol,
+      localHost,
+      options.listenPort,
+      options.appendOpenUrlCredentials,
+    ),
     networkUrl: networkHost ? buildServeUrl(protocol, networkHost, options.listenPort) : undefined,
     networkOpenUrl: networkHost
-      ? buildOpenUrl(protocol, networkHost, options.listenPort, options.token)
+      ? buildOpenUrl(protocol, networkHost, options.listenPort, options.appendOpenUrlCredentials)
       : undefined,
   };
 }
@@ -47,12 +52,10 @@ function buildOpenUrl(
   protocol: "http" | "https",
   host: string,
   port: number,
-  token: string,
+  appendOpenUrlCredentials?: (url: URL) => void,
 ): string {
   const url = new URL(buildServeUrl(protocol, host, port));
-  if (token) {
-    url.searchParams.set("token", token);
-  }
+  appendOpenUrlCredentials?.(url);
   return url.toString();
 }
 

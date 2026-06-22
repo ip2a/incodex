@@ -1,3 +1,5 @@
+import type { AuthController } from "./auth.js";
+
 export interface SentryInitOptions {
   buildFlavor: string;
   appVersion: string;
@@ -7,12 +9,14 @@ export interface SentryInitOptions {
 
 export interface ServeCommandOptions {
   appPath: string;
+  auth: AuthController;
+  configCreated: boolean;
+  configPath: string;
   devMode: boolean;
   listenHost: string;
   listenPort: number;
   tlsCertPath: string | null;
   tlsKeyPath: string | null;
-  token: string;
 }
 
 export interface IncodexServerOptions {
@@ -23,7 +27,7 @@ export interface IncodexServerOptions {
     cert: string | Buffer;
     key: string | Buffer;
   };
-  token: string;
+  auth: AuthController;
   relay: HostBridge;
   webviewRoot: string;
   readIncodexStylesheet: () => Promise<string>;
