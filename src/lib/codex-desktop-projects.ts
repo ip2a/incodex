@@ -1,8 +1,12 @@
-import { readFile, stat } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { stat } from "node:fs/promises";
+import { basename } from "node:path";
 import process from "node:process";
 
-import { deriveCodexHomePath, listCodexHomePathCandidates } from "./codex-home.js";
+import {
+  deriveCodexDesktopGlobalStatePath,
+  loadCodexDesktopGlobalState,
+  type CodexDesktopGlobalState,
+} from "./codex-global-state.js";
 
 export interface CodexDesktopProject {
   root: string;
@@ -17,53 +21,35 @@ export interface LoadedCodexDesktopProjects {
   projects: CodexDesktopProject[];
 }
 
-export function deriveCodexDesktopGlobalStatePath(): string {
-  return join(deriveCodexHomePath(), ".codex-global-state.json");
-}
-
 export async function loadCodexDesktopProjects(
-  globalStatePath: string,
+  globalStatePath?: string,
 ): Promise<LoadedCodexDesktopProjects> {
-  for (const candidatePath of listDesktopGlobalStatePathCandidates(globalStatePath)) {
-    try {
-      const raw = await readFile(candidatePath, "utf8");
-      const projects = await parseCodexDesktopProjects(raw);
-      return {
-        found: true,
-        path: candidatePath,
-        projects,
-      };
-    } catch (error) {
-      if (isMissingFileError(error)) {
-        continue;
-      }
-      throw error;
-    }
+  const defaultPath = globalStatePath ?? deriveCodexDesktopGlobalStatePath();
+  const loaded = await loadCodexDesktopGlobalState();
+
+  if (!loaded.found) {
+    return {
+      found: false,
+      path: defaultPath,
+      projects: [],
+    };
   }
 
+  const projects = await parseCodexDesktopProjects(loaded.state);
   return {
-    found: false,
-    path: globalStatePath,
-    projects: [],
+    found: true,
+    path: loaded.path,
+    projects,
   };
 }
 
-async function parseCodexDesktopProjects(raw: string): Promise<CodexDesktopProject[]> {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return [];
-  }
-
-  if (!isJsonRecord(parsed)) {
-    return [];
-  }
-
-  const roots = uniqueStrings(parsed["electron-saved-workspace-roots"]);
-  const activeRoots = new Set(uniqueStrings(parsed["active-workspace-roots"]));
-  const labels = isJsonRecord(parsed["electron-workspace-root-labels"])
-    ? parsed["electron-workspace-root-labels"]
+async function parseCodexDesktopProjects(
+  state: CodexDesktopGlobalState,
+): Promise<CodexDesktopProject[]> {
+  const roots = uniqueStrings(state["electron-saved-workspace-roots"]);
+  const activeRoots = new Set(uniqueStrings(state["active-workspace-roots"]));
+  const labels = isJsonRecord(state["electron-workspace-root-labels"])
+    ? state["electron-workspace-root-labels"]
     : {};
   const projectsByRoot = new Map<
     string,
@@ -128,28 +114,8 @@ async function isDirectory(path: string): Promise<boolean> {
   }
 }
 
-function isMissingFileError(error: unknown): error is NodeJS.ErrnoException {
-  return error instanceof Error && "code" in error && error.code === "ENOENT";
-}
-
 function isJsonRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
-}
-
-function listDesktopGlobalStatePathCandidates(globalStatePath: string): string[] {
-  const candidates = [globalStatePath];
-  if (globalStatePath !== deriveCodexDesktopGlobalStatePath()) {
-    return candidates;
-  }
-
-  for (const codexHome of listCodexHomePathCandidates()) {
-    const candidatePath = join(codexHome, ".codex-global-state.json");
-    if (!candidates.includes(candidatePath)) {
-      candidates.push(candidatePath);
-    }
-  }
-
-  return candidates;
 }
 
 function normalizeDesktopProjectRoot(root: string): string {

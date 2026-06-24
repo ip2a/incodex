@@ -15,8 +15,18 @@ import {
 } from "./codex-desktop-git-worker.js";
 import {
   deriveCodexDesktopGlobalStatePath,
-  loadCodexDesktopProjects,
-} from "./codex-desktop-projects.js";
+  getFileMtime,
+  loadCodexDesktopGlobalState,
+  readPersistedAtomsFromGlobalState,
+  readPinnedThreadIdsFromGlobalState,
+  readWorkspaceRootsFromGlobalState,
+  saveCodexDesktopGlobalState,
+  writePersistedAtomsToGlobalState,
+  writePinnedThreadIdsToGlobalState,
+  writeWorkspaceRootsToGlobalState,
+  type CodexDesktopGlobalState,
+  type WorkspaceRootState,
+} from "./codex-global-state.js";
 import { debugLog } from "./debug.js";
 import {
   loadLocalEnvironment,
@@ -25,19 +35,6 @@ import {
   saveLocalEnvironmentConfig,
 } from "./local-environments.js";
 import type { HostBridge, JsonRecord } from "./protocol.js";
-import { listCodexSessionCwds } from "./session-cwd-index.js";
-import {
-  derivePersistedAtomRegistryPath,
-  loadPersistedAtomRegistry,
-  savePersistedAtomRegistry,
-} from "./persisted-atom-registry.js";
-import {
-  deriveWorkspaceRootRegistryPath,
-  loadWorkspaceRootRegistry,
-  mergeWorkspaceRootRegistryProjects,
-  saveWorkspaceRootRegistry,
-  type WorkspaceRootRegistryState,
-} from "./workspace-root-registry.js";
 import {
   TerminalSessionManager,
   type TerminalAttachMessage,
@@ -47,22 +44,13 @@ import {
   type TerminalRunActionMessage,
   type TerminalWriteMessage,
 } from "./terminal-session-manager.js";
-import { normalizeThreadListParams } from "./thread-list-params.js";
-
 interface AppServerBridgeOptions {
   appPath: string;
   cwd: string;
   hostId?: string;
   codexHomePath?: string;
-  persistedAtomRegistryPath?: string;
-  workspaceRootRegistryPath?: string;
   gitWorkerBridge?: CodexDesktopGitWorkerBridge;
   codexCliPath?: string;
-}
-
-interface SessionCwdIndexCache {
-  loadedAt: number;
-  cwds: string[];
 }
 
 interface WhamUsageCredits {
@@ -286,7 +274,14 @@ const STATSIG_INITIALIZE_HOST = "ab.chatgpt.com";
 const STATSIG_INITIALIZE_PATH = "/v1/initialize";
 const STATSIG_REGISTER_HOST = "chatgpt.com";
 const STATSIG_REGISTER_PATH = "/ces/v1/rgstr";
-const SESSION_CWD_INDEX_TTL_MS = 30_000;
+const LOCAL_STATSIG_FEATURE_GATES = {
+  "3314958849": {
+    value: true,
+    rule_id: "incodex-local-default",
+  },
+};
+const PERSISTED_ATOM_DEBOUNCE_MS = 200;
+const GLOBAL_STATE_WRITE_RETRY_ATTEMPTS = 3;
 
 export class AppServerBridge extends EventEmitter implements HostBridge {
   private readonly child: ChildProcessWithoutNullStreams;
@@ -311,13 +306,13 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
   private readonly workspaceRoots = new Set<string>();
   private readonly workspaceRootLabels = new Map<string, string>();
   private readonly codexHomePath: string;
-  private sessionCwdIndexCache: SessionCwdIndexCache | null = null;
-  private persistedAtomRegistryPath: string;
-  private workspaceRootRegistryPath: string;
+  private desktopGlobalStatePath: string;
+  private desktopGlobalState: CodexDesktopGlobalState;
+  private lastKnownGoodGlobalState: CodexDesktopGlobalState;
+  private desktopGlobalStateWritePromise: Promise<void> = Promise.resolve();
+  private atomDebounceTimer: NodeJS.Timeout | null = null;
   private readonly gitWorkerBridge: CodexDesktopGitWorkerBridge;
   private activeWorkspaceRoot: string | null;
-  private desktopImportPromptSeen = false;
-  private persistedAtomWritePromise: Promise<void> = Promise.resolve();
   private nextRequestId = 0;
   private isClosing = false;
   private isInitialized = false;
@@ -339,10 +334,9 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     this.hostId = options.hostId ?? "local";
     this.cwd = options.cwd;
     this.codexHomePath = options.codexHomePath ?? deriveCodexHomePath();
-    this.persistedAtomRegistryPath =
-      options.persistedAtomRegistryPath ?? derivePersistedAtomRegistryPath();
-    this.workspaceRootRegistryPath =
-      options.workspaceRootRegistryPath ?? deriveWorkspaceRootRegistryPath();
+    this.desktopGlobalStatePath = deriveCodexDesktopGlobalStatePath();
+    this.desktopGlobalState = {};
+    this.lastKnownGoodGlobalState = {};
     this.gitWorkerBridge =
       options.gitWorkerBridge ??
       new DefaultCodexDesktopGitWorkerBridge({
@@ -385,8 +379,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       ...options,
       codexCliPath,
     });
-    await bridge.restorePersistedAtomRegistry();
-    await bridge.restoreWorkspaceRootRegistry();
+    await bridge.restoreGlobalState();
     await bridge.initialize();
     return bridge;
   }
@@ -402,6 +395,16 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
         error: normalizeError(error).message,
       });
     });
+
+    if (this.atomDebounceTimer) {
+      clearTimeout(this.atomDebounceTimer);
+      this.atomDebounceTimer = null;
+      await this.persistGlobalState().catch((error) => {
+        debugLog("app-server", "failed to flush pending atom updates on close", {
+          error: normalizeError(error).message,
+        });
+      });
+    }
 
     if (!this.childExited) {
       await new Promise<void>((resolve) => {
@@ -428,7 +431,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       });
     }
 
-    await this.persistedAtomWritePromise.catch(() => undefined);
+    await this.desktopGlobalStateWritePromise.catch(() => undefined);
   }
 
   async forwardBridgeMessage(message: unknown): Promise<void> {
@@ -856,61 +859,163 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     this.connectionState = "connected";
   }
 
-  private async restoreWorkspaceRootRegistry(): Promise<void> {
+  private async restoreGlobalState(): Promise<void> {
     try {
-      const loaded = await loadWorkspaceRootRegistry(this.workspaceRootRegistryPath);
-      this.workspaceRootRegistryPath = loaded.path;
-      if (loaded.state) {
-        this.desktopImportPromptSeen = loaded.state.desktopImportPromptSeen;
-        this.applyWorkspaceRootRegistry(loaded.state);
+      const loaded = await loadCodexDesktopGlobalState();
+      this.desktopGlobalStatePath = loaded.path;
+      this.desktopGlobalState = loaded.state;
+      this.lastKnownGoodGlobalState = structuredClone(loaded.state);
+      if (loaded.found) {
+        this.applyWorkspaceRootState(readWorkspaceRootsFromGlobalState(loaded.state));
+        this.applyPersistedAtoms(readPersistedAtomsFromGlobalState(loaded.state));
+        this.applyPinnedThreadIds(readPinnedThreadIdsFromGlobalState(loaded.state));
       }
     } catch (error) {
-      debugLog("app-server", "failed to restore workspace root registry", {
+      debugLog("app-server", "failed to restore Codex desktop global state", {
         error: normalizeError(error).message,
-        path: this.workspaceRootRegistryPath,
+        path: this.desktopGlobalStatePath,
       });
     }
 
-    await this.restoreCodexDesktopWorkspaceRoots();
     this.syncWorkspaceGlobalState();
   }
 
-  private async restoreCodexDesktopWorkspaceRoots(): Promise<void> {
-    try {
-      const loaded = await loadCodexDesktopProjects(deriveCodexDesktopGlobalStatePath());
-      if (loaded.projects.length === 0) {
-        return;
-      }
+  private applyWorkspaceRootState(state: WorkspaceRootState): void {
+    this.workspaceRoots.clear();
+    this.workspaceRootLabels.clear();
 
-      const merged = mergeWorkspaceRootRegistryProjects(
-        this.snapshotWorkspaceRootRegistry(),
-        loaded.projects,
-      );
-      if (!merged.changed) {
-        return;
-      }
+    for (const root of state.roots) {
+      this.workspaceRoots.add(root);
+      const label = state.labels[root]?.trim();
+      this.workspaceRootLabels.set(root, label || basename(root) || "Workspace");
+    }
 
-      this.applyWorkspaceRootRegistry(merged.state);
-      await this.persistWorkspaceRootRegistry();
-    } catch (error) {
-      debugLog("app-server", "failed to import Codex desktop workspace roots", {
-        error: normalizeError(error).message,
-      });
+    this.activeWorkspaceRoot =
+      state.activeRoot && this.workspaceRoots.has(state.activeRoot)
+        ? state.activeRoot
+        : (state.roots[0] ?? null);
+  }
+
+  private applyPersistedAtoms(atoms: Record<string, unknown>): void {
+    this.persistedAtoms.clear();
+    for (const [key, value] of Object.entries(atoms)) {
+      this.persistedAtoms.set(key, value);
     }
   }
 
-  private async restorePersistedAtomRegistry(): Promise<void> {
-    try {
-      const loaded = await loadPersistedAtomRegistry(this.persistedAtomRegistryPath);
-      this.persistedAtomRegistryPath = loaded.path;
-      this.persistedAtoms.clear();
-      for (const [key, value] of Object.entries(loaded.state)) {
-        this.persistedAtoms.set(key, value);
+  private applyPinnedThreadIds(threadIds: string[]): void {
+    this.pinnedThreadIds.clear();
+    for (const threadId of threadIds) {
+      this.pinnedThreadIds.add(threadId);
+    }
+  }
+
+  private snapshotWorkspaceRootState(): WorkspaceRootState {
+    const roots = Array.from(this.workspaceRoots);
+    const labels: Record<string, string> = {};
+    for (const root of roots) {
+      const label = this.workspaceRootLabels.get(root)?.trim();
+      if (label) {
+        labels[root] = label;
       }
+    }
+
+    return {
+      roots,
+      labels,
+      activeRoot:
+        this.activeWorkspaceRoot && this.workspaceRoots.has(this.activeWorkspaceRoot)
+          ? this.activeWorkspaceRoot
+          : (roots[0] ?? null),
+    };
+  }
+
+  private async persistGlobalState(): Promise<void> {
+    const previousState = structuredClone(this.desktopGlobalState);
+
+    this.desktopGlobalState = writeWorkspaceRootsToGlobalState(
+      this.desktopGlobalState,
+      this.snapshotWorkspaceRootState(),
+    );
+    this.desktopGlobalState = writePersistedAtomsToGlobalState(
+      this.desktopGlobalState,
+      Object.fromEntries(this.persistedAtoms),
+    );
+    this.desktopGlobalState = writePinnedThreadIdsToGlobalState(
+      this.desktopGlobalState,
+      Array.from(this.pinnedThreadIds),
+    );
+
+    const stateToWrite = this.desktopGlobalState;
+
+    this.desktopGlobalStateWritePromise = this.desktopGlobalStateWritePromise
+      .catch(() => undefined)
+      .then(async () => {
+        const written = await this.writeGlobalStateWithRetry(stateToWrite);
+        if (!written) {
+          this.desktopGlobalState = previousState;
+          await this.writeGlobalStateFallback();
+          debugLog("app-server", "global state write failed, restored to previous state", {
+            path: this.desktopGlobalStatePath,
+          });
+          return;
+        }
+
+        this.lastKnownGoodGlobalState = structuredClone(stateToWrite);
+      });
+
+    await this.desktopGlobalStateWritePromise;
+  }
+
+  private async writeGlobalStateWithRetry(state: CodexDesktopGlobalState): Promise<boolean> {
+    for (let attempt = 1; attempt <= GLOBAL_STATE_WRITE_RETRY_ATTEMPTS; attempt += 1) {
+      const mtimeBefore = await getFileMtime(this.desktopGlobalStatePath);
+      const current = await loadCodexDesktopGlobalState();
+
+      const merged: CodexDesktopGlobalState = {
+        ...current.state,
+        ...state,
+      };
+
+      try {
+        await saveCodexDesktopGlobalState(this.desktopGlobalStatePath, merged);
+      } catch (error) {
+        debugLog("app-server", "global state write attempt failed", {
+          attempt,
+          error: normalizeError(error).message,
+          path: this.desktopGlobalStatePath,
+        });
+        continue;
+      }
+
+      const mtimeAfter = await getFileMtime(this.desktopGlobalStatePath);
+      if (mtimeBefore === null || mtimeAfter === null) {
+        return true;
+      }
+
+      if (mtimeBefore === mtimeAfter) {
+        return true;
+      }
+
+      debugLog("app-server", "global state changed during write, retrying", {
+        attempt,
+        path: this.desktopGlobalStatePath,
+      });
+    }
+
+    return false;
+  }
+
+  private async writeGlobalStateFallback(): Promise<void> {
+    try {
+      await saveCodexDesktopGlobalState(
+        `${this.desktopGlobalStatePath}.incodex-fallback`,
+        this.lastKnownGoodGlobalState,
+      );
     } catch (error) {
-      debugLog("app-server", "failed to restore persisted atoms", {
+      debugLog("app-server", "failed to write global state fallback backup", {
         error: normalizeError(error).message,
-        path: this.persistedAtomRegistryPath,
+        path: this.desktopGlobalStatePath,
       });
     }
   }
@@ -1876,23 +1981,13 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       deleted: message.deleted === true,
     });
 
-    this.queuePersistedAtomRegistryWrite();
-  }
-
-  private queuePersistedAtomRegistryWrite(): void {
-    const state = Object.fromEntries(this.persistedAtoms);
-    this.persistedAtomWritePromise = this.persistedAtomWritePromise
-      .catch(() => undefined)
-      .then(async () => {
-        try {
-          await savePersistedAtomRegistry(this.persistedAtomRegistryPath, state);
-        } catch (error) {
-          debugLog("app-server", "failed to persist persisted atoms", {
-            error: normalizeError(error).message,
-            path: this.persistedAtomRegistryPath,
-          });
-        }
-      });
+    if (this.atomDebounceTimer) {
+      clearTimeout(this.atomDebounceTimer);
+    }
+    this.atomDebounceTimer = setTimeout(() => {
+      this.atomDebounceTimer = null;
+      void this.persistGlobalState();
+    }, PERSISTED_ATOM_DEBOUNCE_MS);
   }
 
   private handleSharedObjectSubscribe(message: JsonRecord): void {
@@ -1929,7 +2024,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
   }
 
   private async handleOnboardingSkipWorkspace(): Promise<void> {
-    await this.persistWorkspaceRootRegistry();
+    await this.persistGlobalState();
     this.emitBridgeMessage({
       type: "electron-onboarding-skip-workspace-result",
       success: true,
@@ -1943,7 +2038,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     if (roots.length === 0) {
       this.workspaceRoots.clear();
       this.activeWorkspaceRoot = null;
-      await this.persistWorkspaceRootRegistry();
+      await this.persistGlobalState();
       this.emitWorkspaceRootsUpdated();
       return;
     }
@@ -1960,7 +2055,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       this.activeWorkspaceRoot = roots[0] ?? null;
     }
 
-    await this.persistWorkspaceRootRegistry();
+    await this.persistGlobalState();
     this.emitWorkspaceRootsUpdated();
   }
 
@@ -1971,7 +2066,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     }
 
     this.ensureWorkspaceRoot(root, { setActive: true });
-    await this.persistWorkspaceRootRegistry();
+    await this.persistGlobalState();
     this.emitWorkspaceRootsUpdated();
   }
 
@@ -1988,7 +2083,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       this.workspaceRootLabels.delete(root);
     }
 
-    await this.persistWorkspaceRootRegistry();
+    await this.persistGlobalState();
     this.emitBridgeMessage({
       type: "workspace-root-options-updated",
     });
@@ -2973,35 +3068,14 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       case "thread/resume":
         return this.sanitizeThreadResumeParams(params);
       case "thread/list":
-        return await this.sanitizeThreadListParams(params);
+        return this.sanitizeThreadListParams(params);
       default:
         return params;
     }
   }
 
-  private async sanitizeThreadListParams(params: JsonRecord): Promise<JsonRecord> {
-    if (!("cwd" in params) || params.cwd === null || params.cwd === undefined) {
-      return normalizeThreadListParams(params, []);
-    }
-
-    return normalizeThreadListParams(params, await this.getSessionCwdIndex());
-  }
-
-  private async getSessionCwdIndex(): Promise<string[]> {
-    const now = Date.now();
-    if (
-      this.sessionCwdIndexCache &&
-      now - this.sessionCwdIndexCache.loadedAt < SESSION_CWD_INDEX_TTL_MS
-    ) {
-      return this.sessionCwdIndexCache.cwds;
-    }
-
-    const cwds = await listCodexSessionCwds(join(this.codexHomePath, "sessions"));
-    this.sessionCwdIndexCache = {
-      loadedAt: now,
-      cwds,
-    };
-    return cwds;
+  private sanitizeThreadListParams(params: JsonRecord): JsonRecord {
+    return params;
   }
 
   private sanitizeThreadStartParams(params: JsonRecord): JsonRecord {
@@ -3185,7 +3259,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       label,
       setActive,
     });
-    await this.persistWorkspaceRootRegistry();
+    await this.persistGlobalState();
     this.emitWorkspaceRootsUpdated();
     return {
       success: true,
@@ -3210,55 +3284,6 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
       }
       return `Failed to access project path on the host filesystem: ${normalizeError(error).message}`;
     }
-  }
-
-  private applyWorkspaceRootRegistry(state: WorkspaceRootRegistryState): void {
-    this.workspaceRoots.clear();
-    this.workspaceRootLabels.clear();
-    this.desktopImportPromptSeen = state.desktopImportPromptSeen;
-
-    for (const root of state.roots) {
-      this.workspaceRoots.add(root);
-      const label = state.labels[root]?.trim();
-      this.workspaceRootLabels.set(root, label || basename(root) || "Workspace");
-    }
-
-    this.activeWorkspaceRoot =
-      state.activeRoot && this.workspaceRoots.has(state.activeRoot)
-        ? state.activeRoot
-        : (state.roots[0] ?? null);
-  }
-
-  private async persistWorkspaceRootRegistry(): Promise<void> {
-    const state = this.snapshotWorkspaceRootRegistry();
-    try {
-      await saveWorkspaceRootRegistry(this.workspaceRootRegistryPath, state);
-    } catch (error) {
-      debugLog("app-server", "failed to persist workspace root registry", {
-        error: normalizeError(error).message,
-        path: this.workspaceRootRegistryPath,
-      });
-    }
-  }
-
-  private snapshotWorkspaceRootRegistry(): WorkspaceRootRegistryState {
-    const roots = Array.from(this.workspaceRoots);
-    const labels = Object.fromEntries(
-      roots.flatMap((root) => {
-        const label = this.workspaceRootLabels.get(root)?.trim();
-        return label ? [[root, label] as const] : [];
-      }),
-    );
-
-    return {
-      roots,
-      labels,
-      activeRoot:
-        this.activeWorkspaceRoot && this.workspaceRoots.has(this.activeWorkspaceRoot)
-          ? this.activeWorkspaceRoot
-          : (roots[0] ?? null),
-      desktopImportPromptSeen: this.desktopImportPromptSeen,
-    };
   }
 
   private ensureWorkspaceRoot(
@@ -3411,7 +3436,7 @@ export class AppServerBridge extends EventEmitter implements HostBridge {
     this.ensureWorkspaceRoot(root, {
       setActive: true,
     });
-    await this.persistWorkspaceRootRegistry();
+    await this.persistGlobalState();
     this.emitWorkspaceRootsUpdated();
 
     if (context === "onboarding") {
@@ -4645,7 +4670,7 @@ function handleLocalExternalFetchRequest(rawUrl: string): RelativeFetchResponse 
     body: {
       has_updates: true,
       time: Date.now(),
-      feature_gates: {},
+      feature_gates: LOCAL_STATSIG_FEATURE_GATES,
       dynamic_configs: {},
       layer_configs: {},
       param_stores: {},
